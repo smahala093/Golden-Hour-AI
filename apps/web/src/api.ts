@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { DEMO_SHARE_TOKEN, demoProfile, demoReadiness, demoSession, emptySession } from './demoData';
-import { incidentExtractionSchema, type EmergencyProfile, type EmergencyProtocol, type EmergencySession, type ReadinessResult, type TaskStatus } from './types';
+import { incidentExtractionSchema, type EmergencyParticipant, type EmergencyProfile, type EmergencyProtocol, type EmergencySession, type ParticipantRole, type ReadinessResult, type TaskStatus } from './types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '';
 export const MOCK_MODE = import.meta.env.VITE_MOCK_MODE === 'true';
@@ -16,7 +16,8 @@ export class ApiError extends Error {
   }
 }
 
-export interface ShareTokenResult { token: string; tokenId: string; expiresAtUtc: string }
+export interface ShareTokenResult { token: string; tokenId: string; expiresAtUtc: string; path: string }
+export interface ParticipantInviteResult { participantId: string; token: string; expiresAtUtc: string; path: string }
 export interface BystanderView {
   sessionId: string;
   patientName: string | null;
@@ -29,15 +30,31 @@ export interface BystanderView {
   emergencyContact: { name: string; relationship: string; phone: string } | null;
   emergencyNumber: string;
   protocol: EmergencyProtocol | null;
+  expiresAtUtc: string;
 }
 
-async function request(path: string, init?: RequestInit): Promise<unknown> {
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function refreshAccess(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = fetch(`${API_BASE}/api/v1/auth/refresh`, { method: 'POST', credentials: 'include', headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10_000) })
+      .then((response) => response.ok)
+      .catch(() => false)
+      .finally(() => { refreshInFlight = null; });
+  }
+  return refreshInFlight;
+}
+
+async function request(path: string, init?: RequestInit, allowRefresh = true): Promise<unknown> {
+  const hasJsonBody = Boolean(init?.body) && !(typeof FormData !== 'undefined' && init?.body instanceof FormData);
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     signal: init?.signal ?? AbortSignal.timeout(15_000),
     credentials: 'include',
-    headers: { Accept: 'application/json', ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers },
+    headers: { Accept: 'application/json', ...(hasJsonBody ? { 'Content-Type': 'application/json' } : {}), ...init?.headers },
   });
+  const authPath = path.startsWith('/api/v1/auth/login') || path.startsWith('/api/v1/auth/register') || path.startsWith('/api/v1/auth/refresh');
+  if (response.status === 401 && allowRefresh && !authPath && await refreshAccess()) return request(path, init, false);
   if (!response.ok) {
     let message = `Request failed with status ${response.status}`;
     let correlationId: string | undefined;
@@ -55,6 +72,29 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
   return contentType.includes('json') ? response.json() : null;
 }
 
+const participantSchema = z.object({
+  id: z.string(),
+  displayName: z.string(),
+  role: z.enum(['owner', 'family', 'bystander', 'caregiver']),
+  acknowledgedAtUtc: z.string().nullable(),
+}).passthrough();
+
+const patientSnapshotSchema = z.object({
+  fullName: z.string().nullable(),
+  approximateAge: z.number().nullable(),
+  allergies: z.array(z.string()),
+  conditions: z.array(z.string()),
+  medications: z.array(z.string()),
+  procedures: z.array(z.object({ name: z.string(), year: z.number().nullable() }).passthrough()),
+  emergencyContact: z.object({ name: z.string(), relationship: z.string(), phoneNumber: z.string() }).nullable(),
+  capturedAtUtc: z.string(),
+  source: z.literal('profile_snapshot'),
+}).passthrough();
+
+const observationSchema = z.object({
+  id: z.string(), kind: z.string(), value: z.string(), source: z.string(), isConfirmed: z.boolean(), createdAtUtc: z.string(),
+}).passthrough();
+
 const backendSessionSchema = z.object({
   id: z.string(),
   status: z.string().optional(),
@@ -70,6 +110,8 @@ const backendSessionSchema = z.object({
   normalizedTranscript: z.string().nullable().optional(),
   incidentFacts: z.unknown().nullable().optional(),
   interpretationUncertain: z.boolean().optional(),
+  patientSnapshot: patientSnapshotSchema.nullable().optional(),
+  observations: z.array(observationSchema).optional(),
   protocol: z.object({
     id: z.string(),
     version: z.string(),
@@ -92,7 +134,7 @@ const backendSessionSchema = z.object({
     concurrencyToken: z.string().optional(),
   })).optional(),
   timeline: z.array(z.object({ id: z.string(), sequence: z.number().optional(), type: z.string().optional(), message: z.string(), createdAtUtc: z.string() })).optional(),
-  participants: z.array(z.unknown()).optional(),
+  participants: z.array(participantSchema).optional(),
   locations: z.array(z.unknown()).optional(),
 }).passthrough();
 
@@ -192,21 +234,22 @@ function mapSession(payload: unknown): EmergencySession {
     criticalMissingQuestions: backendExtraction.data.criticalMissingQuestions.map((question) => ({ ...question, answerType: ['yes_no', 'single_choice', 'time', 'text'].includes(question.answerType.toLowerCase()) ? question.answerType.toLowerCase() : 'text' })),
   }) : { ...emptySession.extraction, detectedLanguage: raw.originalLanguage ?? 'unknown', incidentCategory: normalizeCategory(raw.selectedCategory), patientRelationship: relationship, uncertainties: ['The server did not provide a valid incident interpretation.'] };
   const firstLocation = raw.locations?.[0];
+  const candidateDescription = firstLocation && typeof firstLocation === 'object' && 'description' in firstLocation ? (firstLocation as { description?: unknown }).description : undefined;
   const location = typeof firstLocation === 'string'
     ? firstLocation
-    : firstLocation && typeof firstLocation === 'object' && 'description' in firstLocation
-      ? String((firstLocation as { description?: unknown }).description ?? '')
+    : typeof candidateDescription === 'string'
+      ? candidateDescription
       : extraction.locationDescription ?? '';
 
-  const participantOptions = (raw.participants ?? []).flatMap((participant) => {
-    if (!participant || typeof participant !== 'object' || !('id' in participant) || !('displayName' in participant)) return [];
-    return [{ id: String((participant as { id: unknown }).id), label: String((participant as { displayName: unknown }).displayName) }];
-  });
-  const participantName = (id: string | null | undefined) => participantOptions.find((participant) => participant.id === id)?.label ?? (id ? 'Assigned participant' : 'Unassigned');
+  const participantDetails = raw.participants ?? [];
+  const participantOptions = participantDetails.map((participant) => ({ id: participant.id, label: participant.displayName }));
+  const participantName = (id: string | null | undefined) => participantOptions.find((participant) => participant.id === id)?.label ?? '';
+  const owner = participantDetails.find((participant) => participant.role === 'owner');
+  const patientSnapshot = raw.patientSnapshot ?? null;
   return {
     id: raw.id,
-    owner: demoSession.owner,
-    patient: demoSession.patient,
+    owner: owner?.displayName ?? (MOCK_MODE ? demoSession.owner : ''),
+    patient: patientSnapshot?.fullName ?? (MOCK_MODE ? demoSession.patient : ''),
     relationship: extraction.patientRelationship,
     category: normalizeCategory(raw.selectedCategory),
     status: mapStatus(raw.status),
@@ -220,9 +263,12 @@ function mapSession(payload: unknown): EmergencySession {
     tasks: (raw.tasks ?? []).map((task) => ({ id: task.id, title: task.title, assignee: participantName(task.assignedParticipantId), assignedParticipantId: task.assignedParticipantId ?? undefined, status: mapTaskStatus(task.status), critical: task.isCritical ?? false, updatedAt: task.completedAtUtc ?? task.acceptedAtUtc ?? raw.updatedAtUtc ?? new Date().toISOString(), concurrencyToken: task.concurrencyToken ?? '' })),
     participants: participantOptions.map((participant) => participant.label),
     participantOptions,
-    protocolVersion: raw.protocol ? `${raw.protocol.id}/${raw.protocol.version}` : demoSession.protocolVersion,
+    participantDetails,
+    patientSnapshot,
+    observations: raw.observations ?? [],
+    protocolVersion: raw.protocol ? `${raw.protocol.id}/${raw.protocol.version}` : '',
     protocol: mapProtocol(raw.protocol),
-    sharingFields: demoProfile.shareFields,
+    sharingFields: MOCK_MODE ? demoProfile.shareFields : [],
     emergencyNumber: raw.emergencyNumber ?? '112',
     concurrencyToken: raw.concurrencyToken ?? '',
   };
@@ -278,10 +324,14 @@ export const api = {
     if (MOCK_MODE) return id === demoSession.id ? Promise.resolve(demoSession) : Promise.reject(new ApiError('Emergency session not found.', 404));
     return request(`/api/v1/sessions/${encodeURIComponent(id)}`).then(mapSession);
   },
-  submitIncident(id: string, input: string, location: string): Promise<EmergencySession> {
+  listSessions(): Promise<EmergencySession[]> {
+    if (MOCK_MODE) return Promise.resolve([demoSession]);
+    return request('/api/v1/sessions?limit=20').then((payload) => z.array(backendSessionSchema).parse(payload).map(mapSession));
+  },
+  submitIncident(id: string, input: string, location: string, skipAi = false): Promise<EmergencySession> {
     const fallback = { ...demoSession, id, originalInput: input || demoSession.originalInput, location: location || demoSession.location };
     return withMockFallback(async () => {
-      await request(`/api/v1/sessions/${encodeURIComponent(id)}/incident`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ originalText: input, selectedLanguage: /[\u0900-\u097f]/u.test(input) ? 'hi' : null, fallbackCategory: categoryToWire(fallback.category) }) });
+      await request(`/api/v1/sessions/${encodeURIComponent(id)}/incident`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ originalText: input, selectedLanguage: /[\u0900-\u097f]/u.test(input) ? 'hi' : null, fallbackCategory: categoryToWire(fallback.category), skipAi }) });
       if (location) {
         const idempotencyKey = crypto.randomUUID();
         await request(`/api/v1/sessions/${encodeURIComponent(id)}/locations`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ latitude: null, longitude: null, description: location, consentProvided: true, idempotencyKey }) });
@@ -304,23 +354,28 @@ export const api = {
     }
     const form = new FormData();
     form.append('audio', recording, 'incident-recording.webm');
-    return fetch(`${API_BASE}/api/v1/sessions/${encodeURIComponent(id)}/voice`, {
+    return request(`/api/v1/sessions/${encodeURIComponent(id)}/voice`, {
       method: 'POST',
-      credentials: 'include',
       headers: { Accept: 'application/json', 'Idempotency-Key': crypto.randomUUID() },
       body: form,
-      signal: AbortSignal.timeout(15_000),
-    }).then(async (response) => {
-      if (!response.ok) throw new ApiError('The recording could not be uploaded. Type what happened instead.', response.status);
-      return mapSession(await response.json());
-});
-
+    }).then(mapSession).catch((error: unknown) => {
+      if (error instanceof ApiError) throw new ApiError('The recording could not be uploaded. Type what happened instead.', error.status, error.correlationId);
+      throw error;
+    });
   },
-  addTimeline(id: string, type: 'call-connected' | 'patient-departed' | 'patient-arrived' | 'observation', message: string): Promise<void> {
+  updateLocation(id: string, description: string): Promise<EmergencySession> {
+    const fallback = { ...demoSession, id, location: description };
+    return withMockFallback(async () => {
+      const idempotencyKey = crypto.randomUUID();
+      return mapSession(await request(`/api/v1/sessions/${encodeURIComponent(id)}/locations`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ latitude: null, longitude: null, description, consentProvided: true, idempotencyKey }) }));
+    }, fallback);
+  },
+  addTimeline(id: string, type: 'call-initiated' | 'call-connected' | 'patient-departed' | 'patient-arrived' | 'observation', message: string): Promise<void> {
     return withMockFallback(async () => {
       const idempotencyKey = crypto.randomUUID();
       await request(`/api/v1/sessions/${encodeURIComponent(id)}/timeline`, {
         method: 'POST',
+        keepalive: type === 'call-initiated',
         headers: { 'Idempotency-Key': idempotencyKey },
         body: JSON.stringify({ type, message, idempotencyKey, ...(type === 'call-connected' ? { userConfirmed: true } : {}) }),
       });
@@ -335,37 +390,47 @@ export const api = {
     }, fallback);
   },
   createShareToken(id: string): Promise<ShareTokenResult> {
-    const fallback = { token: DEMO_SHARE_TOKEN, tokenId: 'demo-token-id', expiresAtUtc: new Date(Date.now() + 30 * 60_000).toISOString() };
+    const fallback = { token: DEMO_SHARE_TOKEN, tokenId: 'demo-token-id', expiresAtUtc: new Date(Date.now() + 30 * 60_000).toISOString(), path: `/share#${DEMO_SHARE_TOKEN}` };
     return withMockFallback(async () => {
       const result = z.object({ id: z.string(), token: z.string().min(20), expiresAtUtc: z.string(), path: z.string() }).parse(await request(`/api/v1/sessions/${encodeURIComponent(id)}/share-tokens`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ lifetimeMinutes: 30 }) }));
-      return { token: result.token, tokenId: result.id, expiresAtUtc: result.expiresAtUtc };
+      if (result.path !== `/share#${result.token}`) throw new ApiError('The server returned an unsafe emergency sharing path.', 500);
+      return { token: result.token, tokenId: result.id, expiresAtUtc: result.expiresAtUtc, path: result.path };
     }, fallback);
   },
   revokeShareToken(id: string, tokenId: string): Promise<void> {
     return withMockFallback(async () => { await request(`/api/v1/sessions/${encodeURIComponent(id)}/share-tokens/${encodeURIComponent(tokenId)}`, { method: 'DELETE' }); }, undefined);
   },
+  inviteParticipant(id: string, displayName: string, role: Exclude<ParticipantRole, 'owner'>): Promise<ParticipantInviteResult> {
+    if (MOCK_MODE) return Promise.resolve({ participantId: crypto.randomUUID(), token: 'demo-participant-invitation-token', expiresAtUtc: new Date(Date.now() + 30 * 60_000).toISOString(), path: `/emergency/${encodeURIComponent(id)}/join#demo-participant-invitation-token` });
+    return request(`/api/v1/sessions/${encodeURIComponent(id)}/participants/invitations`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ displayName, role, lifetimeMinutes: 30 }) }).then((payload) => {
+      const result = z.object({ participantId: z.string(), token: z.string(), expiresAtUtc: z.string(), path: z.string() }).parse(payload);
+      if (result.path !== `/emergency/${id}/join#${result.token}`) throw new ApiError('The server returned an unsafe participant invitation path.', 500);
+      return result;
+    });
+  },
+  joinParticipant(id: string, token: string): Promise<EmergencyParticipant> {
+    if (MOCK_MODE) return Promise.resolve({ id: 'demo-joined-participant', displayName: 'Demo participant', role: 'family', acknowledgedAtUtc: null });
+    return request(`/api/v1/sessions/${encodeURIComponent(id)}/participants/join`, { method: 'POST', body: JSON.stringify({ token }) }).then((payload) => participantSchema.parse(payload));
+  },
+  acknowledgeParticipant(id: string, participantId: string): Promise<EmergencyParticipant> {
+    if (MOCK_MODE) return Promise.resolve({ id: participantId, displayName: 'Demo participant', role: 'family', acknowledgedAtUtc: new Date().toISOString() });
+    return request(`/api/v1/sessions/${encodeURIComponent(id)}/participants/${encodeURIComponent(participantId)}/acknowledge`, { method: 'POST' }).then((payload) => participantSchema.parse(payload));
+  },
   getBystander(token: string): Promise<BystanderView> {
     if (MOCK_MODE) {
       if (token !== DEMO_SHARE_TOKEN) return Promise.reject(new ApiError('This emergency link is invalid, expired, or revoked.', 410));
-      return Promise.resolve({ sessionId: demoSession.id, patientName: demoProfile.name, approximateAge: 64, category: demoSession.category, location: demoSession.location, allergies: demoProfile.allergies, conditions: demoProfile.conditions, medicines: demoProfile.medicines, emergencyContact: { name: demoProfile.contacts[0]?.name ?? '', relationship: demoProfile.contacts[0]?.relationship ?? '', phone: demoProfile.contacts[0]?.phone ?? '' }, emergencyNumber: '112', protocol: null });
+      return Promise.resolve({ sessionId: demoSession.id, patientName: demoProfile.name, approximateAge: 64, category: demoSession.category, location: demoSession.location, allergies: demoProfile.allergies, conditions: demoProfile.conditions, medicines: demoProfile.medicines, emergencyContact: { name: demoProfile.contacts[0]?.name ?? '', relationship: demoProfile.contacts[0]?.relationship ?? '', phone: demoProfile.contacts[0]?.phone ?? '' }, emergencyNumber: '112', protocol: null, expiresAtUtc: new Date(Date.now() + 30 * 60_000).toISOString() });
     }
-    return request(`/api/v1/bystander/${encodeURIComponent(token)}`).then((payload) => {
-      const result = z.object({
-        sessionId: z.string(), emergencyNumber: z.string(),
-        incidentFacts: z.object({ incidentCategory: z.string() }).passthrough().nullable(),
-        protocol: backendSessionSchema.shape.protocol,
-        profile: z.object({ name: z.string().nullable(), approximateAge: z.number().nullable(), allergies: z.array(z.string()), conditions: z.array(z.string()), medications: z.array(z.string()), emergencyContact: z.object({ name: z.string(), relationship: z.string(), phoneNumber: z.string() }).passthrough().nullable() }),
-        latestLocation: z.object({ description: z.string().nullable(), latitude: z.number().nullable(), longitude: z.number().nullable() }).passthrough().nullable(),
-      }).parse(payload);
-      const contact = result.profile.emergencyContact;
-      return { sessionId: result.sessionId, patientName: result.profile.name, approximateAge: result.profile.approximateAge, category: normalizeCategory(result.incidentFacts?.incidentCategory), location: result.latestLocation?.description ?? '', allergies: result.profile.allergies, conditions: result.profile.conditions, medicines: result.profile.medications, emergencyContact: contact ? { name: contact.name, relationship: contact.relationship, phone: contact.phoneNumber } : null, emergencyNumber: result.emergencyNumber, protocol: mapProtocol(result.protocol) ?? null };
+    return request('/api/v1/bystander', { headers: { 'X-Emergency-Share-Token': token } }).then((payload) => {
+      const result = z.object({ sessionId: z.string(), patientName: z.string().nullable(), approximateAge: z.number().nullable(), category: z.string(), location: z.string().nullable(), allergies: z.array(z.string()), conditions: z.array(z.string()), medicines: z.array(z.string()), emergencyContact: z.object({ name: z.string(), relationship: z.string(), phone: z.string() }).nullable(), expiresAtUtc: z.string(), emergencyNumber: z.string(), protocol: backendSessionSchema.shape.protocol }).parse(payload);
+      return { ...result, category: normalizeCategory(result.category), location: result.location ?? '', protocol: mapProtocol(result.protocol) ?? null };
     });
   },
   reportBystanderObservation(token: string, observation: { conscious?: string; breathingNormally?: string; severeBleeding?: string }): Promise<void> {
-    return withMockFallback(async () => { await request(`/api/v1/bystander/${encodeURIComponent(token)}/observations`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify(observation) }); }, undefined);
+    return withMockFallback(async () => { await request('/api/v1/bystander/observations', { method: 'POST', headers: { 'X-Emergency-Share-Token': token, 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify(observation) }); }, undefined);
   },
   reportBystanderLocation(token: string, latitude: number, longitude: number): Promise<void> {
-    return withMockFallback(async () => { await request(`/api/v1/bystander/${encodeURIComponent(token)}/location`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ latitude, longitude, consentConfirmed: true }) }); }, undefined);
+    return withMockFallback(async () => { await request('/api/v1/bystander/location', { method: 'POST', headers: { 'X-Emergency-Share-Token': token, 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ latitude, longitude, consentConfirmed: true }) }); }, undefined);
   },
   closeSession(id: string, concurrencyToken: string): Promise<void> {
     return withMockFallback(async () => { await request(`/api/v1/sessions/${encodeURIComponent(id)}/close`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ concurrencyToken }) }); }, undefined);

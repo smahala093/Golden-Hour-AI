@@ -61,7 +61,17 @@ public sealed class WebhookCoordinator(
         if (await dbContext.WebhookReceipts.AnyAsync(x => x.Provider == provider && x.DeliveryId == deliveryId, cancellationToken))
             return new WebhookResult(true, "already-accepted");
 
-        using var document = JsonDocument.Parse(body);
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(body);
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException("Webhook payload is not valid JSON.", exception);
+        }
+        using (document)
+        {
         var root = document.RootElement;
         var messageId = root.TryGetProperty("messageId", out var id) ? id.GetString() : null;
         var status = root.TryGetProperty("status", out var statusElement) ? statusElement.GetString() : null;
@@ -92,6 +102,7 @@ public sealed class WebhookCoordinator(
         });
         await dbContext.SaveChangesAsync(cancellationToken);
         return new WebhookResult(false, "accepted");
+        }
     }
 }
 

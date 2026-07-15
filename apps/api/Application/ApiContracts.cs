@@ -67,7 +67,7 @@ public sealed record CreateSessionRequest(
     string? TypedLocation,
     string CountryCode = "IN");
 
-public sealed record SubmitIncidentRequest(string OriginalText, string? SelectedLanguage, IncidentCategory? FallbackCategory);
+public sealed record SubmitIncidentRequest(string OriginalText, string? SelectedLanguage, IncidentCategory? FallbackCategory, bool SkipAi = false);
 public sealed record CriticalAnswersRequest(
     IReadOnlyDictionary<string, string>? Answers = null,
     string? QuestionId = null,
@@ -107,6 +107,19 @@ public sealed record TaskResponse(
 public sealed record TimelineEventResponse(Guid Id, long Sequence, string Type, string Message, DateTime CreatedAtUtc);
 public sealed record ParticipantResponse(Guid Id, string DisplayName, ParticipantRole Role, DateTime? AcknowledgedAtUtc);
 public sealed record LocationResponse(Guid Id, decimal? Latitude, decimal? Longitude, string? Description, DateTime CreatedAtUtc);
+public sealed record ObservationResponse(Guid Id, string Kind, string Value, string Source, bool IsConfirmed, DateTime CreatedAtUtc);
+public sealed record SnapshotProcedureResponse(string Name, int? Year);
+public sealed record SnapshotContactResponse(string Name, string Relationship, string PhoneNumber);
+public sealed record PatientSnapshotResponse(
+    string? FullName,
+    int? ApproximateAge,
+    IReadOnlyList<string> Allergies,
+    IReadOnlyList<string> Conditions,
+    IReadOnlyList<string> Medications,
+    IReadOnlyList<SnapshotProcedureResponse> Procedures,
+    SnapshotContactResponse? EmergencyContact,
+    DateTime CapturedAtUtc,
+    string Source = "profile_snapshot");
 
 public sealed record SessionResponse(
     Guid Id,
@@ -122,6 +135,8 @@ public sealed record SessionResponse(
     IncidentExtraction? IncidentFacts,
     bool InterpretationUncertain,
     ProtocolResponse? Protocol,
+    PatientSnapshotResponse? PatientSnapshot,
+    IReadOnlyList<ObservationResponse> Observations,
     IReadOnlyList<TaskResponse> Tasks,
     IReadOnlyList<TimelineEventResponse> Timeline,
     IReadOnlyList<ParticipantResponse> Participants,
@@ -134,14 +149,14 @@ public sealed record BystanderProfileResponse(string? Name, int? ApproximateAge,
 public sealed record BystanderContactResponse(string Name, string Relationship, string Phone);
 public sealed record BystanderSessionResponse(
     Guid SessionId,
-    string PatientName,
-    int ApproximateAge,
+    string? PatientName,
+    int? ApproximateAge,
     IncidentCategory Category,
     string Location,
     IReadOnlyList<string> Allergies,
     IReadOnlyList<string> Conditions,
     IReadOnlyList<string> Medicines,
-    BystanderContactResponse EmergencyContact,
+    BystanderContactResponse? EmergencyContact,
     DateTime ExpiresAtUtc,
     string EmergencyNumber,
     ProtocolResponse? Protocol);

@@ -19,20 +19,20 @@ const initialDraft: DraftEmergency = {
 interface AppStateValue {
   authenticated: boolean;
   authChecked: boolean;
-  setAuthenticated(value: boolean): void;
+  setAuthenticated: (value: boolean) => void;
   profile: EmergencyProfile;
-  setProfile(profile: EmergencyProfile): void;
+  setProfile: (profile: EmergencyProfile) => void;
   preferences: Preferences;
-  updatePreferences(update: Partial<Preferences>): void;
+  updatePreferences: (update: Partial<Preferences>) => void;
   draft: DraftEmergency;
-  updateDraft(update: Partial<DraftEmergency>): void;
-  answerQuestion(id: string, answer: TriState): void;
-  resetDraft(): void;
+  updateDraft: (update: Partial<DraftEmergency>) => void;
+  answerQuestion: (id: string, answer: TriState) => void;
+  resetDraft: () => void;
   session: EmergencySession;
-  setSession(session: EmergencySession): void;
+  setSession: (session: EmergencySession) => void;
   online: boolean;
   queueCount: number;
-  refreshQueueCount(): void;
+  refreshQueueCount: () => void;
 }
 
 const AppStateContext = createContext<AppStateValue | null>(null);

@@ -16,6 +16,9 @@ const queryClient = new QueryClient({
 });
 
 registerSW({ immediate: true });
+if (navigator.onLine && 'serviceWorker' in navigator) {
+  void navigator.serviceWorker.ready.then(() => fetch('/api/v1/protocols?country=IN', { credentials: 'omit' })).catch(() => undefined);
+}
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

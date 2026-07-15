@@ -21,4 +21,18 @@ export default tseslint.config(
       '@typescript-eslint/consistent-type-imports': 'error',
     },
   },
+  {
+    files: ['src/**/*.tsx'],
+    rules: {
+      // Hook-returned callbacks and React state setters are already lexical functions.
+      '@typescript-eslint/unbound-method': 'off',
+    },
+  },
+  {
+    files: ['src/state.tsx', 'src/components/AppShell.tsx', 'src/pages/EmergencyFlowPages.tsx'],
+    rules: {
+      // These modules intentionally colocate a provider/component with its matching hook or pure loader.
+      'react-refresh/only-export-components': 'off',
+    },
+  },
 );

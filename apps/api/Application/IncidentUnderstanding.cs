@@ -106,16 +106,24 @@ public sealed partial class IncidentExtractionValidator : AbstractValidator<Inci
         {
             context.AddFailure("AI output claims an external emergency action succeeded.");
         }
+
+        if (ImperativeActionPattern().IsMatch(text))
+        {
+            context.AddFailure("AI output contains treatment or action instructions instead of reported facts.");
+        }
     }
 
-    [GeneratedRegex(@"\b(diagnos(?:is|ed|e)|you have|patient has|confirmed (?:heart attack|stroke|anaphylaxis))\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\b(diagnos(?:is|ed|e)|you have|patient has|confirmed (?:heart attack|stroke|anaphylaxis)|(?:likely|possible|possibly|suspected)\s+(?:an?\s+)?(?:heart attack|stroke|anaphylaxis))\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex DiagnosisPattern();
 
-    [GeneratedRegex(@"\b(take|give|administer|swallow)\b.{0,40}\b(mg|ml|tablet|capsule|dose|aspirin|medicine|medication)\b|\b\d+(?:\.\d+)?\s*(?:mg|ml)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\b(?:take|give|administer|swallow|inject|use|should (?:take|give|administer))\b.{0,50}\b(?:mg|ml|tablet|capsule|dose|aspirin|epinephrine|adrenaline|nitroglycerin|medicine|medication|drug)\b|\b\d+(?:\.\d+)?\s*(?:mg|ml)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex MedicationPattern();
 
-    [GeneratedRegex(@"\b(ambulance|emergency services?|hospital|responder)\b.{0,40}\b(has been|were|is)\s+(called|contacted|notified|dispatched)|\bhelp is on the way\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\b(?:ambulance|emergency services?|hospital|responder)\b.{0,40}\b(?:(?:has been|was|were|is)\s+)?(?:called|contacted|notified|dispatched)\b|\b(?:112|911|999)\s+(?:has been|was|is)\s+(?:called|contacted|notified)\b|\bhelp is on the way\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ExternalActionPattern();
+
+    [GeneratedRegex(@"(?:^|[.!?]\s+)(?:call|apply|move|perform|start|stop|place|position|press|elevate|bandage|treat|resuscitate|do cpr|begin cpr|keep the person|lay the person|turn the person)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Multiline)]
+    private static partial Regex ImperativeActionPattern();
 }
 
 public sealed class IncidentUnderstandingService(
@@ -156,7 +164,7 @@ public sealed class IncidentUnderstandingService(
             logger.LogWarning("AI incident extraction timed out.");
             return Fallback(originalText, selectedLanguage, fallbackCategory, relationship, "ai_timeout");
         }
-        catch (Exception exception) when (exception is not ValidationException)
+        catch (Exception exception) when (exception is not ValidationException and not OperationCanceledException)
         {
             logger.LogWarning(exception, "AI incident extraction was unavailable; using static fallback.");
             return Fallback(originalText, selectedLanguage, fallbackCategory, relationship, "ai_unavailable");

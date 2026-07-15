@@ -56,12 +56,18 @@ public sealed class ProtocolCatalogue
         ? protocol
         : throw new KeyNotFoundException("The selected protocol is not in the reviewed catalogue.");
 
+    public IReadOnlyList<ProtocolDefinition> List(string country) => protocols.Values
+        .Where(x => string.Equals(x.Country, country, StringComparison.OrdinalIgnoreCase))
+        .OrderBy(x => x.Id, StringComparer.Ordinal)
+        .ToArray();
+
     public ProtocolDefinition Select(IncidentExtraction extraction, IncidentCategory fallbackCategory)
     {
         var id = extraction switch
         {
             { IsConscious: TernaryAnswer.No, IsBreathingNormally: TernaryAnswer.No } => "unconscious-not-breathing",
-            { IsConscious: TernaryAnswer.No } => "unconscious-breathing",
+            { IsConscious: TernaryAnswer.No, IsBreathingNormally: TernaryAnswer.Yes } => "unconscious-breathing",
+            { IsConscious: TernaryAnswer.No } => "unknown-emergency",
             { IsHeavyBleedingReported: TernaryAnswer.Yes } => "heavy-external-bleeding",
             _ => (extraction.IncidentCategory is IncidentCategory.Unknown ? fallbackCategory : extraction.IncidentCategory) switch
             {

@@ -107,6 +107,8 @@ public sealed class EmergencySession : Entity
 {
     public Guid? OwnerId { get; set; }
     public Guid? EmergencyProfileId { get; set; }
+    public byte[]? CreateIdempotencyKeyHash { get; set; }
+    public byte[]? CreateRequestHash { get; set; }
     public PatientRelationship PatientRelationship { get; set; }
     public IncidentCategory SelectedCategory { get; set; }
     public SessionStatus Status { get; set; } = SessionStatus.Active;

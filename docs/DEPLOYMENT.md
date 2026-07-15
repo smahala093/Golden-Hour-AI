@@ -100,7 +100,7 @@ The API runs as the .NET image's non-root `$APP_UID` on port `8080`. The Docker 
 5. Budget/alerts and an owner/cost-center tag. The Bicep template creates billable resources; delete disposable resource groups after use.
 6. High-entropy, unique PostgreSQL/JWT/webhook values. OpenAI and demo passwords are optional. Do not reuse local/CI examples.
 
-`dev` uses economical prototype SKUs, including free SignalR where available. `prod` selects Standard SignalR and General Purpose PostgreSQL, but the template still needs an owner review for capacity, high availability, geo-backup, private endpoints/egress, WAF/front door, custom domain/certificate, retention, quotas, alerting, and disaster recovery. These are not silently assumed.
+`dev` uses economical prototype SKUs, including free SignalR where available. `prod` selects Standard SignalR and General Purpose PostgreSQL, but the checked-in application still uses its in-process SignalR hub and outbox dispatcher. The template therefore permits exactly one app replica until Azure SignalR delegation and a distributed outbox lease are implemented and verified. It also still needs an owner review for capacity, high availability, geo-backup, private endpoints/egress, WAF/front door, custom domain/certificate, retention, quotas, alerting, and disaster recovery. These are not silently assumed.
 
 ## Local Azure deployment
 

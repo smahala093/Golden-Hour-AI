@@ -8,6 +8,7 @@ import { PageHeading } from '../components/AppShell';
 import { supportedLanguages } from '../i18n';
 import { useAppState } from '../state';
 import type { EmergencyContact, EmergencyProfile, Preferences } from '../types';
+import { clearUserScopedOfflineData } from '../offline';
 
 function Toggle({ label, hint, checked, onChange }: { label: string; hint?: string; checked: boolean; onChange(value: boolean): void }) {
   return <label className="toggle-row"><span><strong>{label}</strong>{hint && <small>{hint}</small>}</span><span className="switch"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span aria-hidden="true" /></span></label>;
@@ -37,19 +38,24 @@ export function ContactsPage() {
   const { t } = useTranslation();
   const { profile, setProfile } = useAppState();
   const [adding, setAdding] = useState(false);
-  const add = (event: FormEvent<HTMLFormElement>) => {
+  const [error, setError] = useState('');
+  const [pending, setPending] = useState(false);
+  const add = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const contact: EmergencyContact = { id: crypto.randomUUID(), name: String(data.get('name') ?? ''), relationship: String(data.get('relationship') ?? ''), phone: String(data.get('phone') ?? ''), verified: false };
+    const value = (key: string) => { const field = data.get(key); return typeof field === 'string' ? field : ''; };
+    const contact: EmergencyContact = { id: crypto.randomUUID(), name: value('name'), relationship: value('relationship'), phone: value('phone'), verified: false };
     if (!contact.name || !contact.relationship || !contact.phone) return;
-    setProfile({ ...profile, contacts: [...profile.contacts, contact] });
-    setAdding(false);
+    setPending(true); setError('');
+    try { setProfile(await api.updateProfile({ ...profile, contacts: [...profile.contacts, contact] })); setAdding(false); }
+    catch { setError(t('errors.genericBody')); }
+    finally { setPending(false); }
   };
   return (
     <div>
       <PageHeading title={t('contacts.title')} description={t('contacts.intro')}><button className="button" type="button" onClick={() => setAdding(true)}><Plus aria-hidden="true" />{t('contacts.add')}</button></PageHeading>
       <ul className="card-grid">{profile.contacts.map((contact) => <li className="card card--raised" key={contact.id}><div className="page-heading__row"><div><h2>{contact.name}</h2><p>{contact.relationship} · <a href={`tel:${contact.phone.replace(/[^+0-9]/g, '')}`}>{contact.phone}</a></p></div><span className={`task-status ${contact.verified ? 'task-status--completed' : ''}`}>{contact.verified ? t('contacts.verified') : t('contacts.unverified')}</span></div></li>)}</ul>
-      {adding && <form className="card form-grid section" onSubmit={add}><div className="field"><label htmlFor="contact-name">{t('auth.name')}</label><input id="contact-name" name="name" required /></div><div className="field"><label htmlFor="contact-relationship">{t('contacts.relationship')}</label><input id="contact-relationship" name="relationship" required /></div><div className="field"><label htmlFor="contact-phone">{t('contacts.phone')}</label><input id="contact-phone" name="phone" type="tel" required /></div><div className="button-row"><button className="button" type="submit">{t('common.save')}</button><button className="button button--secondary" type="button" onClick={() => setAdding(false)}>{t('common.cancel')}</button></div></form>}
+      {adding && <form className="card form-grid section" onSubmit={(event) => void add(event)}><div className="field"><label htmlFor="contact-name">{t('auth.name')}</label><input id="contact-name" name="name" required /></div><div className="field"><label htmlFor="contact-relationship">{t('contacts.relationship')}</label><input id="contact-relationship" name="relationship" required /></div><div className="field"><label htmlFor="contact-phone">{t('contacts.phone')}</label><input id="contact-phone" name="phone" type="tel" required /></div>{error && <p className="field-error" role="alert">{error}</p>}<div className="button-row"><button className="button" type="submit" disabled={pending}>{pending ? t('common.loading') : t('common.save')}</button><button className="button button--secondary" type="button" onClick={() => setAdding(false)}>{t('common.cancel')}</button></div></form>}
     </div>
   );
 }
@@ -65,8 +71,11 @@ const shareOptions = [
 export function PrivacyPage() {
   const { t } = useTranslation();
   const { profile, setProfile } = useAppState();
-  const toggle = (field: string, enabled: boolean) => setProfile({ ...profile, shareFields: enabled ? [...new Set([...profile.shareFields, field])] : profile.shareFields.filter((item) => item !== field) });
-  return <div><PageHeading title={t('sharing.title')} description={t('sharing.intro')} /><section className="card card--raised">{shareOptions.map((option) => <Toggle key={option.field} label={t(option.key)} checked={profile.shareFields.includes(option.field)} onChange={(enabled) => toggle(option.field, enabled)} />)}<div className="privacy-lock section"><LockKeyhole aria-hidden="true" /><span>{t('sharing.hidden')}</span></div><button className="button" type="button">{t('common.save')}</button></section></div>;
+  const [draftFields, setDraftFields] = useState(profile.shareFields);
+  const [notice, setNotice] = useState('');
+  const save = useMutation({ mutationFn: () => api.updateProfile({ ...profile, shareFields: draftFields }), onSuccess: (saved) => { setProfile(saved); setNotice(t('common.done')); }, onError: () => setNotice(t('errors.genericBody')) });
+  const toggle = (field: string, enabled: boolean) => setDraftFields((current) => enabled ? [...new Set([...current, field])] : current.filter((item) => item !== field));
+  return <div><PageHeading title={t('sharing.title')} description={t('sharing.intro')} /><section className="card card--raised">{shareOptions.map((option) => <Toggle key={option.field} label={t(option.key)} checked={draftFields.includes(option.field)} onChange={(enabled) => toggle(option.field, enabled)} />)}<div className="privacy-lock section"><LockKeyhole aria-hidden="true" /><span>{t('sharing.hidden')}</span></div><button className="button" type="button" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? t('common.loading') : t('common.save')}</button><p role="status">{notice}</p></section></div>;
 }
 
 const onboardingSteps = ['onboarding.language', 'onboarding.details', 'onboarding.health', 'onboarding.people', 'onboarding.privacy', 'onboarding.review'] as const;
@@ -80,7 +89,7 @@ export function OnboardingPage() {
   const [approved, setApproved] = useState(false);
   const [error, setError] = useState('');
   const update = (value: Partial<EmergencyProfile>) => setDraft((current) => ({ ...current, ...value }));
-  const mutation = useMutation({ mutationFn: () => api.updateProfile({ ...draft, reviewedAt: new Date().toISOString() }), onSuccess: (saved) => { setProfile(saved); updatePreferences({ language: saved.preferredLanguage }); navigate('/home'); }, onError: () => setError(t('errors.genericBody')) });
+  const mutation = useMutation({ mutationFn: () => api.updateProfile({ ...draft, reviewedAt: new Date().toISOString() }), onSuccess: (saved) => { setProfile(saved); updatePreferences({ language: saved.preferredLanguage }); void navigate('/home'); }, onError: () => setError(t('errors.genericBody')) });
 
   const next = () => {
     if (step === 1 && (!draft.name || !draft.dateOfBirth)) { setError(t('auth.invalid')); return; }
@@ -105,7 +114,7 @@ function ProfileSummary({ profile }: { profile: EmergencyProfile }) {
 
 export function ReadinessPage() {
   const { t } = useTranslation();
-  const query = useQuery({ queryKey: ['readiness'], queryFn: api.getReadiness, retry: 1 });
+  const query = useQuery({ queryKey: ['readiness'], queryFn: () => api.getReadiness(), retry: 1 });
   if (!query.data) return <div role="status">{query.isError ? t('errors.genericBody') : t('common.loading')}</div>;
   const result = query.data;
   return <div><PageHeading title={t('readiness.title')} description={t('readiness.deterministic')} /><div className="two-column"><section className="card card--raised"><div className="score-ring" style={{ '--score': `${result.score}%` } as React.CSSProperties}><strong>{result.score}</strong></div><h2>{t('readiness.score', { score: result.score })}</h2></section><section className="stack"><article className="card"><h2>{t('readiness.complete')}</h2><ul className="plain-list">{result.completed.map((item) => <li key={item}><Check aria-hidden="true" /> {item}</li>)}</ul></article><article className="card"><h2>{t('readiness.improve')}</h2><ul className="plain-list">{result.improvements.map((item) => <li key={item}>{item}</li>)}</ul></article></section></div></div>;
@@ -113,8 +122,9 @@ export function ReadinessPage() {
 
 export function HistoryPage() {
   const { t } = useTranslation();
-  const { session } = useAppState();
-  return <div><PageHeading title={t('history.title')} description={t('history.intro')} />{session.id ? <article className="card card--raised"><div className="page-heading__row"><div><p className="eyebrow">{session.id}</p><h2>{session.patient}</h2><p>{session.category.replaceAll('-', ' ')} · {session.location}</p><span className="task-status">{t(`history.${session.status === 'closed' ? 'closed' : 'active'}`)}</span></div><Link className="button" to={`/emergency/${session.id}`}>{t('history.open')}<ArrowRight aria-hidden="true" /></Link></div></article> : <p className="empty-state">{t('history.empty')}</p>}</div>;
+  const sessions = useQuery({ queryKey: ['sessions-history'], queryFn: () => api.listSessions(), retry: 1 });
+  if (sessions.isPending) return <div role="status">{t('common.loading')}</div>;
+  return <div><PageHeading title={t('history.title')} description={t('history.intro')} />{sessions.data?.length ? <div className="card-grid">{sessions.data.map((session) => <article className="card card--raised" key={session.id}><div className="page-heading__row"><div><p className="eyebrow">{session.id}</p><h2>{session.patient || t('common.unknown')}</h2><p>{session.category.replaceAll('-', ' ')} · {session.location || t('common.unknown')}</p><span className="task-status">{t(`history.${session.status === 'closed' ? 'closed' : 'active'}`)}</span></div><Link className="button" to={`/emergency/${session.id}`}>{t('history.open')}<ArrowRight aria-hidden="true" /></Link></div></article>)}</div> : <p className="empty-state">{t('history.empty')}</p>}</div>;
 }
 
 function UserRoundPlaceholder() { return <span className="brand__mark" aria-hidden="true"><Accessibility /></span>; }
@@ -123,7 +133,7 @@ export function SettingsPage() {
   const { t } = useTranslation();
   const { preferences, updatePreferences, setAuthenticated } = useAppState();
   const navigate = useNavigate();
-  const logout = async () => { await api.logout(); setAuthenticated(false); navigate('/'); };
+  const logout = async () => { await api.logout(); clearUserScopedOfflineData(); setAuthenticated(false); void navigate('/'); };
   return <div><PageHeading title={t('settings.title')} /><div className="two-column"><section className="card card--raised stack"><Link className="nav-link" to="/settings/language"><Languages aria-hidden="true" /><span>{t('settings.language')}</span><ArrowRight aria-hidden="true" /></Link><Link className="nav-link" to="/settings/accessibility"><Accessibility aria-hidden="true" /><span>{t('settings.accessibility')}</span><ArrowRight aria-hidden="true" /></Link></section><section className="card"><h2>{t('settings.appearance')}</h2><div className="choice-grid">{(['light', 'dark', 'system'] as const).map((theme) => <label className="choice-card" key={theme}><input type="radio" name="theme" checked={preferences.theme === theme} onChange={() => updatePreferences({ theme })} />{theme === 'dark' ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}<span>{t(`settings.${theme}`)}</span></label>)}</div><Toggle label={t('settings.simple')} hint={t('settings.simpleHint')} checked={preferences.simpleMode} onChange={(simpleMode) => updatePreferences({ simpleMode })} /><Toggle label={t('settings.offlineCard')} hint={t('settings.offlineHint')} checked={preferences.offlineCardEnabled} onChange={(offlineCardEnabled) => updatePreferences({ offlineCardEnabled })} /><button className="button button--ghost" type="button" onClick={() => void logout()}>{t('settings.signOut')}</button></section></div></div>;
 }
 
@@ -136,6 +146,6 @@ export function LanguagePage() {
 export function AccessibilityPage() {
   const { t } = useTranslation();
   const { preferences, updatePreferences } = useAppState();
-  const toggle = <K extends keyof Preferences>(key: K) => (value: boolean) => updatePreferences({ [key]: value } as Partial<Preferences>);
+  const toggle = <K extends keyof Preferences>(key: K) => (value: boolean) => updatePreferences({ [key]: value });
   return <div><PageHeading title={t('accessibility.title')} /><section className="card card--raised"><Toggle label={t('accessibility.highContrast')} checked={preferences.highContrast} onChange={toggle('highContrast')} /><Toggle label={t('accessibility.largeText')} checked={preferences.largeText} onChange={toggle('largeText')} /><Toggle label={t('accessibility.reducedMotion')} checked={preferences.reducedMotion} onChange={toggle('reducedMotion')} /><div className="privacy-lock section"><ShieldCheck aria-hidden="true" /><span>{t('accessibility.keyboard')} {t('accessibility.zoom')}</span></div></section></div>;
 }

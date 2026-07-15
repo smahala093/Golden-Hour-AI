@@ -19,6 +19,7 @@ export type TriState = 'yes' | 'no' | 'unknown';
 export type SourceKind = 'user-reported' | 'profile' | 'ai-extracted' | 'confirmed' | 'unknown';
 export type TaskStatus = 'open' | 'accepted' | 'declined' | 'completed';
 export type SessionStatus = 'active' | 'departed' | 'at-hospital' | 'closed';
+export type ParticipantRole = 'owner' | 'family' | 'bystander' | 'caregiver';
 
 export const incidentExtractionSchema = z.object({
   detectedLanguage: z.string().min(2).max(35),
@@ -96,6 +97,34 @@ export interface EmergencyTask {
   concurrencyToken: string;
 }
 
+export interface EmergencyParticipant {
+  id: string;
+  displayName: string;
+  role: ParticipantRole;
+  acknowledgedAtUtc: string | null;
+}
+
+export interface SessionObservation {
+  id: string;
+  kind: string;
+  value: string;
+  source: string;
+  isConfirmed: boolean;
+  createdAtUtc: string;
+}
+
+export interface PatientSnapshot {
+  fullName: string | null;
+  approximateAge: number | null;
+  allergies: string[];
+  conditions: string[];
+  medications: string[];
+  procedures: { name: string; year: number | null }[];
+  emergencyContact: { name: string; relationship: string; phoneNumber: string } | null;
+  capturedAtUtc: string;
+  source: 'profile_snapshot';
+}
+
 export interface EmergencySession {
   id: string;
   owner: string;
@@ -113,6 +142,9 @@ export interface EmergencySession {
   tasks: EmergencyTask[];
   participants: string[];
   participantOptions?: { id: string; label: string }[];
+  participantDetails: EmergencyParticipant[];
+  patientSnapshot: PatientSnapshot | null;
+  observations: SessionObservation[];
   protocolVersion: string;
   protocol?: EmergencyProtocol;
   sharingFields: string[];

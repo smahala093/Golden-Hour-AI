@@ -14,8 +14,8 @@ export function OfflinePage() {
     <div>
       <PageHeading title={t('offline.title')} description={t('offline.body', { number })}><WifiOff aria-hidden="true" size={40} /></PageHeading>
       <div className="two-column">
-        <section className="card"><h2>{t('offline.card')}</h2>{card ? <><p className="eyebrow">{t('common.stale')}</p><dl className="data-list"><div><dt>Name</dt><dd>{card.name}</dd></div><div><dt>Approximate age</dt><dd>{card.approximateAge ?? t('common.unknown')}</dd></div><div><dt>Allergies</dt><dd>{card.criticalAllergies.join(', ') || t('common.unknown')}</dd></div></dl></> : <p>{t('offline.none')}</p>}</section>
-        <section className="card"><h2>{t('offline.protocol')}</h2><p>{t('common.protocolDisclaimer')}</p><p>{t('offline.queue', { count: queueCount })}</p><button className="button button--secondary" type="button" onClick={() => window.location.reload()}>{t('offline.retry')}</button></section>
+        <section className="card"><h2>{t('offline.card')}</h2>{card ? <><p className="eyebrow">{t('common.stale')}</p><p>{t('offline.saved', { time: new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(card.savedAtUtc)) })}</p><dl className="data-list"><div><dt>{t('offline.name')}</dt><dd>{card.name || t('common.unknown')}</dd></div><div><dt>{t('offline.age')}</dt><dd>{card.approximateAge ?? t('common.unknown')}</dd></div><div><dt>{t('offline.allergies')}</dt><dd>{card.criticalAllergies.join(', ') || t('common.unknown')}</dd></div></dl></> : <p>{t('offline.none')}</p>}</section>
+        <section className="card"><h2>{t('offline.protocol')}</h2><p>{t('common.protocolDisclaimer')}</p><p>{t('offline.queue', { count: queueCount })}</p><p>{t('offline.privacy')}</p><button className="button button--secondary" type="button" onClick={() => window.location.reload()}>{t('offline.retry')}</button></section>
       </div>
     </div>
   );
@@ -34,8 +34,4 @@ export function NotFoundPage() {
 export function GenericErrorPage() {
   const { t } = useTranslation();
   return <section className="centered-state"><AlertTriangle aria-hidden="true" size={44} /><h1>{t('errors.genericTitle')}</h1><p>{t('errors.genericBody')}</p><div className="button-row"><a className="button button--danger" href={`tel:${emergencyNumber()}`}>{t('common.call', { number: emergencyNumber() })}</a><button className="button button--secondary" onClick={() => window.location.reload()}>{t('errors.reload')}</button></div></section>;
-}
-
-export function PlaceholderPage({ title }: { title: string }) {
-  return <section><PageHeading title={title} description="This screen is included in the prototype flow." /></section>;
 }

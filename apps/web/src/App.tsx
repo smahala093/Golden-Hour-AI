@@ -1,18 +1,21 @@
-import { Navigate, Outlet, Route, Routes } from 'react-router-dom';
+import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { AppShell, PublicShell } from './components/AppShell';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { HomePage } from './pages/HomePage';
 import { CriticalQuestionsPage, EmergencyActionPage, IncidentCapturePage, StartEmergencyPage } from './pages/EmergencyFlowPages';
 import { AnonymousEmergencyPage, AuthPage, LandingPage } from './pages/PublicPages';
-import { BystanderPage, CoordinationRoomPage, HospitalHandoverPage, ResponderBriefPage, ShareQrPage, TaskBoardPage } from './pages/SessionPages';
+import { BystanderPage, CoordinationRoomPage, HospitalHandoverPage, JoinParticipantPage, ResponderBriefPage, ShareQrPage, TaskBoardPage } from './pages/SessionPages';
 import { AccessibilityPage, ContactsPage, HistoryPage, LanguagePage, OnboardingPage, PrivacyPage, ProfilePage, ReadinessPage, SettingsPage } from './pages/ProfilePages';
 import { GenericErrorPage, NotFoundPage, OfflinePage, UnauthorizedPage } from './pages/SystemPages';
 import { useAppState } from './state';
 
 function ProtectedLayout() {
+  const { t } = useTranslation();
   const { authenticated, authChecked } = useAppState();
-  if (!authChecked) return <main id="main-content" className="centered-state" role="status">Checking your secure session…</main>;
-  if (!authenticated) return <Navigate to="/login" replace />;
+  const location = useLocation();
+  if (!authChecked) return <main id="main-content" className="centered-state" role="status">{t('auth.checking')}</main>;
+  if (!authenticated) return <Navigate to="/login" state={{ from: `${location.pathname}${location.search}${location.hash}` }} replace />;
   return <AppShell><Outlet /></AppShell>;
 }
 
@@ -29,7 +32,7 @@ export function App() {
           <Route path="login" element={<AuthPage mode="login" />} />
           <Route path="register" element={<AuthPage mode="register" />} />
           <Route path="help-nearby" element={<AnonymousEmergencyPage />} />
-          <Route path="share/:token" element={<BystanderPage />} />
+          <Route path="share" element={<BystanderPage />} />
           <Route path="unauthorized" element={<UnauthorizedPage />} />
         </Route>
         <Route element={<ProtectedLayout />}>
@@ -47,6 +50,7 @@ export function App() {
           <Route path="emergency/:sessionId/responder" element={<ResponderBriefPage />} />
           <Route path="emergency/:sessionId/handover" element={<HospitalHandoverPage />} />
           <Route path="emergency/:sessionId/share" element={<ShareQrPage />} />
+          <Route path="emergency/:sessionId/join" element={<JoinParticipantPage />} />
           <Route path="history" element={<HistoryPage />} />
           <Route path="readiness" element={<ReadinessPage />} />
           <Route path="settings" element={<SettingsPage />} />

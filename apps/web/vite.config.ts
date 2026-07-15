@@ -7,7 +7,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['brand-mark.svg', 'protocols.json'],
+      includeAssets: ['brand-mark.svg'],
       manifest: {
         name: 'Golden Hour AI',
         short_name: 'Golden Hour',
@@ -20,8 +20,9 @@ export default defineConfig({
         scope: '/',
         categories: ['medical', 'utilities'],
         icons: [
-          { src: '/brand-mark.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
-          { src: '/brand-mark-maskable.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'maskable' },
+          { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+          { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+          { src: '/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
       workbox: {
@@ -29,9 +30,9 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,svg,json,woff2}'],
         runtimeCaching: [
           {
-            urlPattern: ({ url }) => url.pathname.endsWith('/protocols.json'),
+            urlPattern: ({ url }) => url.pathname === '/api/v1/protocols' && url.searchParams.get('country') === 'IN',
             handler: 'CacheFirst',
-            options: { cacheName: 'reviewed-protocols-v1', expiration: { maxEntries: 4, maxAgeSeconds: 2592000 } },
+            options: { cacheName: 'reviewed-server-protocols-v1', expiration: { maxEntries: 2, maxAgeSeconds: 2592000 } },
           },
         ],
       },

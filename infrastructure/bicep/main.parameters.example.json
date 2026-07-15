@@ -16,7 +16,7 @@
     "openAiModel": { "value": "gpt-4.1-mini" },
     "emergencyNumber": { "value": "112" },
     "minReplicas": { "value": 1 },
-    "maxReplicas": { "value": 2 },
+    "maxReplicas": { "value": 1 },
     "tags": {
       "value": {
         "owner": "replace-with-team-or-owner",

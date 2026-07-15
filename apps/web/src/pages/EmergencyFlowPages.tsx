@@ -9,6 +9,7 @@ import { emergencyNumber, PageHeading } from '../components/AppShell';
 import { hindiDemoInput } from '../demoData';
 import { useAppState } from '../state';
 import { incidentCategories, type EmergencyProtocol, type IncidentCategory, type PatientRelationship, type TriState } from '../types';
+import { getProtocolTranslation } from '../protocolTranslations';
 
 const categoryTranslationKeys: Record<IncidentCategory, string> = {
   'chest-pain': 'category.chestPain',
@@ -37,7 +38,7 @@ export function StartEmergencyPage() {
     mutationFn: () => api.createSession(draft.category, draft.relationship),
     onSuccess: (session) => {
       setSession(session);
-      navigate('/emergency/capture');
+      void navigate('/emergency/capture');
     },
   });
 
@@ -78,6 +79,7 @@ export function IncidentCapturePage() {
   const [microphoneDenied, setMicrophoneDenied] = useState(false);
   const [locationDenied, setLocationDenied] = useState(false);
   const [error, setError] = useState('');
+  const [skipPending, setSkipPending] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -147,19 +149,26 @@ export function IncidentCapturePage() {
       return;
     }
     try {
-      const updated = recordedBlob
+      let updated = recordedBlob
         ? await api.uploadVoice(session.id, recordedBlob)
         : await api.submitIncident(session.id, draft.input.trim(), draft.location.trim());
+      if (recordedBlob && draft.location.trim()) updated = await api.updateLocation(session.id, draft.location.trim());
       setSession(updated);
-      navigate(updated.extraction.criticalMissingQuestions.length > 0 ? '/emergency/questions' : '/emergency/action');
+      void navigate(updated.extraction.criticalMissingQuestions.length > 0 ? '/emergency/questions' : '/emergency/action');
     } catch {
       setError(t('errors.genericBody'));
     }
   };
 
-  const skipAi = () => {
-    setSession({ ...session, category: draft.category, originalInput: draft.input, location: draft.location, extraction: { ...session.extraction, incidentCategory: draft.category, confidence: 0, uncertainties: ['AI processing was skipped by the user.'] } });
-    navigate('/emergency/action');
+  const skipAi = async () => {
+    if (!draft.input.trim()) { setError(t('auth.invalid')); return; }
+    setSkipPending(true); setError('');
+    try {
+      const updated = await api.submitIncident(session.id, draft.input.trim(), draft.location.trim(), true);
+      setSession(updated);
+      void navigate('/emergency/action');
+    } catch { setError(t('errors.genericBody')); }
+    finally { setSkipPending(false); }
   };
 
   return (
@@ -170,7 +179,7 @@ export function IncidentCapturePage() {
           {recording ? <Square aria-hidden="true" /> : <Mic aria-hidden="true" />}{recording ? `${t('capture.stop')} · 0:${String(recordingSeconds).padStart(2, '0')}` : recordedBlob ? `${t('common.done')} · 0:${String(recordingSeconds).padStart(2, '0')}` : t('capture.speak')}
         </button>
         {microphoneDenied && <div className="permission-note" role="status"><MicOff aria-hidden="true" /><span>{t('capture.micDenied')}</span></div>}
-        <div className="field"><label htmlFor="incident-input">{t('capture.typed')}</label><textarea id="incident-input" value={draft.input} onChange={(event) => updateDraft({ input: event.target.value })} placeholder={t('capture.placeholder')} maxLength={2_000} /><small>{draft.input.length} / 2,000</small></div>
+        <div className="field"><label htmlFor="incident-input">{t('capture.typed')}</label><textarea id="incident-input" value={draft.input} onChange={(event) => updateDraft({ input: event.target.value })} placeholder={t('capture.placeholder')} maxLength={12_000} /><small>{draft.input.length} / 12,000</small></div>
         <button className="button button--ghost" type="button" onClick={() => updateDraft({ input: hindiDemoInput })}>{t('capture.demo')}</button>
         <div className="card card--muted stack--tight">
           <h2>{t('capture.location')}</h2>
@@ -179,7 +188,7 @@ export function IncidentCapturePage() {
           {locationDenied && <p className="permission-note" role="status">{t('capture.locationDenied')}</p>}
         </div>
         {error && <p className="field-error" role="alert">{error}</p>}
-        <div className="button-row"><button className="button" type="submit">{t('capture.submit')}</button><button className="button button--secondary" type="button" onClick={skipAi}>{t('capture.skipAi')}</button></div>
+        <div className="button-row"><button className="button" type="submit">{t('capture.submit')}</button><button className="button button--secondary" type="button" disabled={skipPending} onClick={() => void skipAi()}>{skipPending ? t('common.loading') : t('capture.skipAi')}</button></div>
       </form>
     </div>
   );
@@ -196,7 +205,7 @@ export function CriticalQuestionsPage() {
   const question = questions[index];
 
   useEffect(() => {
-    if (!question) navigate('/emergency/action', { replace: true });
+    if (!question) void navigate('/emergency/action', { replace: true });
   }, [navigate, question]);
 
   if (!question) return null;
@@ -213,7 +222,7 @@ export function CriticalQuestionsPage() {
     try {
       const updated = await api.answerQuestions(session.id, draft.answers);
       setSession({ ...updated, extraction: { ...updated.extraction, isBreathingNormally: draft.answers.breathing ?? updated.extraction.isBreathingNormally, isConscious: draft.answers.conscious ?? updated.extraction.isConscious } });
-      navigate('/emergency/action');
+      void navigate('/emergency/action');
     } catch {
       setError(t('errors.genericBody'));
     } finally {
@@ -238,23 +247,27 @@ export function CriticalQuestionsPage() {
   );
 }
 
-const protocolSchema = z.object({
-  disclaimer: z.string(), version: z.string(), country: z.string(), reviewStatus: z.string(),
-  protocols: z.array(z.object({
-    id: z.string(), category: z.string(), title: z.string(), version: z.string(), reviewStatus: z.string(), country: z.string(), emergencyCallInstruction: z.string(),
-    doActions: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string() })), doNotActions: z.array(z.string()), escalationRule: z.string(), source: z.string(), translationKey: z.string(),
-    translations: z.record(z.string(), z.object({ emergencyCallInstruction: z.string(), doActions: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string() })), doNotActions: z.array(z.string()), escalationRule: z.string() })).optional(),
-  })),
-});
+const protocolItemSchema = z.object({
+    id: z.string(), version: z.string(), reviewStatus: z.string(), country: z.string(), notice: z.string(), emergencyCallInstruction: z.string(),
+    doActions: z.array(z.string()), doNotActions: z.array(z.string()), escalationRule: z.string(), source: z.string(),
+  }).passthrough();
+const protocolSchema = z.union([z.array(protocolItemSchema), z.object({ protocols: z.array(protocolItemSchema) }).passthrough()]);
 
-export async function loadCachedProtocol(category: IncidentCategory, language: string): Promise<EmergencyProtocol> {
-  const response = await fetch('/protocols.json');
+function protocolId(category: IncidentCategory, breathing: TriState = 'unknown'): string {
+  const ids: Record<IncidentCategory, string> = { 'chest-pain': 'chest-pain', 'breathing-difficulty': 'unknown-emergency', 'fall-injury': 'fall-or-injury', unconscious: breathing === 'no' ? 'unconscious-not-breathing' : 'unconscious-breathing', seizure: 'seizure', 'heavy-bleeding': 'heavy-external-bleeding', 'road-accident': 'unknown-emergency', 'allergic-reaction': 'suspected-allergic-reaction', 'child-emergency': 'unknown-emergency', unknown: 'unknown-emergency' };
+  return ids[category];
+}
+
+export async function loadCachedProtocol(category: IncidentCategory, language: string, breathing: TriState = 'unknown'): Promise<EmergencyProtocol> {
+  const response = await fetch('/api/v1/protocols?country=IN', { credentials: 'omit' });
   if (!response.ok) throw new Error('Protocol catalogue unavailable');
-  const catalogue = protocolSchema.parse(await response.json());
-  const raw = catalogue.protocols.find((protocol) => protocol.category === category) ?? catalogue.protocols.find((protocol) => protocol.id === 'unknown');
+  const parsed = protocolSchema.parse(await response.json());
+  const protocols = Array.isArray(parsed) ? parsed : parsed.protocols;
+  const raw = protocols.find((protocol) => protocol.id === protocolId(category, breathing)) ?? protocols.find((protocol) => protocol.id === 'unknown-emergency');
   if (!raw) throw new Error('Fallback protocol missing');
-  const translation = raw.translations?.[language];
-  return { id: raw.id, title: raw.title, version: raw.version, reviewStatus: raw.reviewStatus, country: raw.country, emergencyCallInstruction: translation?.emergencyCallInstruction ?? raw.emergencyCallInstruction, doActions: translation?.doActions ?? raw.doActions, doNotActions: translation?.doNotActions ?? raw.doNotActions, escalationRule: translation?.escalationRule ?? raw.escalationRule, source: raw.source, disclaimer: catalogue.disclaimer };
+  const translation = getProtocolTranslation(language, raw.id);
+  const actionText = translation?.actions ?? raw.doActions;
+  return { id: raw.id, title: raw.id.replaceAll('-', ' '), version: raw.version, reviewStatus: raw.reviewStatus, country: raw.country, emergencyCallInstruction: translation?.call ?? raw.emergencyCallInstruction, doActions: actionText.map((title, index) => ({ id: `action-${index + 1}`, title, detail: '' })), doNotActions: translation?.doNot ?? raw.doNotActions, escalationRule: translation?.escalation ?? raw.escalationRule, source: raw.source, disclaimer: raw.notice };
 }
 
 export function EmergencyActionPage() {
@@ -265,10 +278,10 @@ export function EmergencyActionPage() {
   const [callAttempted, setCallAttempted] = useState(false);
   const [callSaving, setCallSaving] = useState(false);
   const [callError, setCallError] = useState('');
-  const number = emergencyNumber();
+  const number = session.emergencyNumber || emergencyNumber();
   const language = (i18n.resolvedLanguage ?? i18n.language).split('-')[0] ?? 'en';
-  const protocolQuery = useQuery({ queryKey: ['protocol', session.category, language], queryFn: () => loadCachedProtocol(session.category, language), enabled: !session.protocol, staleTime: Infinity, retry: 1 });
-  const protocol = session.protocol ?? protocolQuery.data;
+  const protocolQuery = useQuery({ queryKey: ['protocol', session.category, language, session.extraction.isBreathingNormally], queryFn: () => loadCachedProtocol(session.category, language, session.extraction.isBreathingNormally), staleTime: Infinity, retry: 1 });
+  const protocol = protocolQuery.data ?? session.protocol;
   const actions = useMemo(() => protocol ? [{ id: 'emergency-call', title: protocol.emergencyCallInstruction, detail: t('action.noClaim') }, ...protocol.doActions] : [], [protocol, t]);
   const current = actions[step];
 
@@ -277,7 +290,7 @@ export function EmergencyActionPage() {
     setCallError('');
     try {
       await api.addTimeline(session.id, 'call-connected', 'Call connection confirmed by the user.');
-      const event = { id: crypto.randomUUID(), at: new Date().toISOString(), title: 'Emergency call connected', detail: 'Connection confirmed by the user, not by the provider.', source: 'confirmed' as const };
+      const event = { id: crypto.randomUUID(), at: new Date().toISOString(), title: t('action.callConnectedTitle'), detail: t('action.callConnectedDetail'), source: 'confirmed' as const };
       setSession({ ...session, timeline: [...session.timeline, event], updatedAt: event.at });
     } catch {
       setCallError(t('errors.genericBody'));
@@ -298,14 +311,15 @@ export function EmergencyActionPage() {
         <p className="eyebrow">{t('action.step', { current: step + 1, total: actions.length })}</p>
         <h2>{current.title}</h2>
         {current.detail && <p>{current.detail}</p>}
-        {step === 0 ? <><a className="button button--danger" href={`tel:${number}`} onClick={() => setCallAttempted(true)}><Phone aria-hidden="true" />{t('common.call', { number })}</a>{callAttempted && <button className="button button--secondary" type="button" disabled={callSaving} onClick={() => void confirmConnected()}><Check aria-hidden="true" />{t('action.callConnected')}</button>}{callError && <p className="field-error" role="alert">{callError}</p>}</> : null}
-        {step < actions.length - 1 ? <button className="button" type="button" onClick={() => setStep((currentStep) => currentStep + 1)}>{t('action.next')}</button> : <button className="button" type="button" onClick={() => navigate(`/emergency/${session.id}`)}>{t('action.coordinate')}</button>}
+        {step === 0 ? <><a className="button button--danger" href={`tel:${number}`} onClick={() => { setCallAttempted(true); void api.addTimeline(session.id, 'call-initiated', 'Emergency dial action initiated by the user; connection is not confirmed.').catch(() => undefined); }}><Phone aria-hidden="true" />{t('common.call', { number })}</a>{callAttempted && <button className="button button--secondary" type="button" disabled={callSaving} onClick={() => void confirmConnected()}><Check aria-hidden="true" />{t('action.callConnected')}</button>}{callError && <p className="field-error" role="alert">{callError}</p>}</> : null}
+        {step < actions.length - 1 ? <button className="button" type="button" onClick={() => setStep((currentStep) => currentStep + 1)}>{t('action.next')}</button> : <button className="button" type="button" onClick={() => { void navigate(`/emergency/${session.id}`); }}>{t('action.coordinate')}</button>}
       </section>
       <div className="two-column section">
         <aside className="card uncertainty"><h2>{t('action.uncertainty')}</h2><p>{t('action.language', { language: session.extraction.detectedLanguage, confidence: Math.round(session.extraction.languageConfidence * 100) })}</p>{session.extraction.uncertainties.map((uncertainty) => <p key={uncertainty}>{uncertainty}</p>)}</aside>
         <aside className="card"><h2>{t('action.original')}</h2><p className="transcript" lang={/^hi(?:ndi)?$/i.test(session.extraction.detectedLanguage) ? 'hi' : session.extraction.detectedLanguage.toLowerCase()}>{session.originalInput}</p></aside>
       </div>
       <aside className="disclaimer">{protocol.disclaimer}</aside>
+      <section className="card section"><h2>{t('action.doNot')}</h2><ul className="plain-list">{protocol.doNotActions.map((action) => <li key={action}>{action}</li>)}</ul><h2>{t('action.escalation')}</h2><p>{protocol.escalationRule}</p></section>
       {!['en', 'hi'].includes(language) && <p className="permission-note" role="status">{t('action.translationFallback')}</p>}
     </div>
   );

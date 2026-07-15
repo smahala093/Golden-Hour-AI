@@ -32,14 +32,16 @@ export function useSessionConnection(sessionId: string | undefined, online: bool
       connection.on('TaskUpdated', handleUpdate);
       connection.on('ParticipantJoined', handleUpdate);
       connection.onreconnecting(() => setState('connecting'));
-      connection.onreconnected(async () => {
-        try {
-          await connection?.invoke('JoinSession', sessionId);
-          refreshRef.current();
-          setState('connected');
-        } catch {
-          setState('polling');
-        }
+      connection.onreconnected(() => {
+        void (async () => {
+          try {
+            await connection?.invoke('JoinSession', sessionId);
+            refreshRef.current();
+            setState('connected');
+          } catch {
+            setState('polling');
+          }
+        })();
       });
       connection.onclose(() => {
         if (!disposed) setState('polling');

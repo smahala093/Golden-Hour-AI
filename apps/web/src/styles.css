@@ -342,3 +342,10 @@ p { line-height: 1.6; }
   body, .card { background: white; color: black; box-shadow: none; }
   .main-content { width: 100%; padding: 0; }
 }
+
+@media (forced-colors: active) {
+  * { forced-color-adjust: auto; }
+  .emergency-button, .call-dock__button, .button, .brand__mark { border: 3px solid ButtonText; }
+  .choice-card:has(input:checked), .answer-button[aria-pressed='true'] { outline: 3px solid Highlight; }
+  .participant-dot, .timeline li::before { background: Highlight; }
+}

@@ -41,7 +41,9 @@ builder.Services.AddOptions<AuthenticationOptions>().Bind(builder.Configuration.
         "Authentication configuration must include issuer, audience, and a signing key of at least 32 UTF-8 bytes.")
     .ValidateOnStart();
 builder.Services.AddOptions<OpenAiOptions>().Bind(builder.Configuration.GetSection("OpenAI"))
-    .Validate(x => Uri.TryCreate(x.BaseUrl, UriKind.Absolute, out _) && !string.IsNullOrWhiteSpace(x.Model), "OpenAI base URL and model are required.")
+    .Validate(x => Uri.TryCreate(x.BaseUrl, UriKind.Absolute, out _) && !string.IsNullOrWhiteSpace(x.Model)
+        && !string.IsNullOrWhiteSpace(x.SpeechModel) && !string.IsNullOrWhiteSpace(x.TextToSpeechModel)
+        && !string.IsNullOrWhiteSpace(x.TextToSpeechVoice), "OpenAI base URL and model names are required.")
     .Validate(x => configuredUseMocks || !string.IsNullOrWhiteSpace(x.ApiKey), "OpenAI API key is required when provider mocks are disabled.")
     .ValidateOnStart();
 builder.Services.AddOptions<WebhookOptions>().Bind(builder.Configuration.GetSection("Webhook"))
@@ -68,7 +70,7 @@ builder.Services.AddDbContext<GoldenHourDbContext>(options =>
 {
     if (useInMemory)
     {
-        options.UseInMemoryDatabase($"golden-hour-{builder.Environment.EnvironmentName}");
+        options.UseInMemoryDatabase(builder.Configuration["Database:Name"] ?? $"golden-hour-{builder.Environment.EnvironmentName}");
     }
     else
     {
@@ -93,10 +95,12 @@ builder.Services.AddIdentityCore<ApplicationUser>(options =>
     .AddEntityFrameworkStores<GoldenHourDbContext>()
     .AddDefaultTokenProviders();
 
-var authentication = builder.Configuration.GetSection("Authentication").Get<AuthenticationOptions>() ?? new AuthenticationOptions();
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
+    .AddJwtBearer();
+builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+    .Configure<Microsoft.Extensions.Options.IOptions<AuthenticationOptions>>((options, configuredOptions) =>
     {
+        var authentication = configuredOptions.Value;
         options.MapInboundClaims = false;
         options.TokenValidationParameters = new TokenValidationParameters
         {
@@ -150,19 +154,23 @@ builder.Services.AddAuthorization(options =>
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    var authPermitLimit = builder.Configuration.GetValue("RateLimits:AuthPermitLimit", 10);
+    var bystanderPermitLimit = builder.Configuration.GetValue("RateLimits:BystanderPermitLimit", 30);
+    var anonymousStartPermitLimit = builder.Configuration.GetValue("RateLimits:AnonymousStartPermitLimit", 15);
+    var globalPermitLimit = builder.Configuration.GetValue("RateLimits:GlobalPermitLimit", 180);
     options.AddPolicy("auth", context => RateLimitPartition.GetFixedWindowLimiter(
         context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-        _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = authPermitLimit, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
     options.AddPolicy("bystander", context => RateLimitPartition.GetFixedWindowLimiter(
         context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-        _ => new FixedWindowRateLimiterOptions { PermitLimit = 30, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = bystanderPermitLimit, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
     options.AddPolicy("anonymous-start", context => RateLimitPartition.GetFixedWindowLimiter(
         context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-        _ => new FixedWindowRateLimiterOptions { PermitLimit = 15, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = anonymousStartPermitLimit, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
         RateLimitPartition.GetFixedWindowLimiter(
             context.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-            _ => new FixedWindowRateLimiterOptions { PermitLimit = 180, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = globalPermitLimit, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
 });
 
 builder.Services.AddEndpointsApiExplorer();
@@ -200,7 +208,6 @@ builder.Services.AddSingleton<IRealtimeNotifier, SignalRNotifier>();
 builder.Services.AddSingleton<IEventBus, NullEventBus>();
 builder.Services.AddSingleton<IFileStorage, UnavailableFileStorage>();
 builder.Services.AddSingleton<IMapProvider, MockMapProvider>();
-builder.Services.AddSingleton<ITextToSpeechProvider, MockTextToSpeechProvider>();
 builder.Services.AddSingleton<MockNotificationProvider>();
 builder.Services.AddSingleton<ISmsProvider>(provider => provider.GetRequiredService<MockNotificationProvider>());
 builder.Services.AddSingleton<IEmailProvider>(provider => provider.GetRequiredService<MockNotificationProvider>());
@@ -210,13 +217,16 @@ if (configuredUseMocks)
 {
     builder.Services.AddSingleton<IAiProvider, MockAiProvider>();
     builder.Services.AddSingleton<ISpeechToTextProvider, MockSpeechToTextProvider>();
+    builder.Services.AddSingleton<ITextToSpeechProvider, MockTextToSpeechProvider>();
 }
 else
 {
     builder.Services.AddHttpClient<OpenAiResponsesProvider>((serviceProvider, client) => ConfigureOpenAiClient(serviceProvider, client));
     builder.Services.AddHttpClient<OpenAiSpeechToTextProvider>((serviceProvider, client) => ConfigureOpenAiClient(serviceProvider, client));
+    builder.Services.AddHttpClient<OpenAiTextToSpeechProvider>((serviceProvider, client) => ConfigureOpenAiClient(serviceProvider, client));
     builder.Services.AddScoped<IAiProvider>(provider => provider.GetRequiredService<OpenAiResponsesProvider>());
     builder.Services.AddScoped<ISpeechToTextProvider>(provider => provider.GetRequiredService<OpenAiSpeechToTextProvider>());
+    builder.Services.AddScoped<ITextToSpeechProvider>(provider => provider.GetRequiredService<OpenAiTextToSpeechProvider>());
 }
 builder.Services.AddHostedService<OutboxDispatcher>();
 
@@ -229,11 +239,12 @@ if (app.Environment.IsProduction())
     app.UseMiddleware<SecurityHeadersMiddleware>();
 }
 app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseMiddleware<SensitiveResponseCacheMiddleware>();
 app.UseExceptionHandler();
 app.UseMiddleware<SameOriginMutationMiddleware>();
 if (app.Environment.IsDevelopment()) app.UseCors("development-web");
-app.UseRateLimiter();
 app.UseAuthentication();
+app.UseRateLimiter();
 app.UseAuthorization();
 app.UseDefaultFiles();
 app.UseStaticFiles();
@@ -262,6 +273,8 @@ if (app.Environment.IsDevelopment())
 }
 
 var api = app.MapGroup("/api/v1");
+api.MapGet("/protocols", (string? country, ProtocolCatalogue catalogue) =>
+    Results.Ok(catalogue.List(string.IsNullOrWhiteSpace(country) ? "IN" : country))).AllowAnonymous();
 var auth = api.MapGroup("/auth").RequireRateLimiting("auth");
 
 auth.MapPost("/register", async Task<IResult> (
@@ -284,9 +297,22 @@ auth.MapPost("/register", async Task<IResult> (
     var result = await userManager.CreateAsync(user, request.Password);
     if (!result.Succeeded)
         return Results.ValidationProblem(result.Errors.GroupBy(x => x.Code).ToDictionary(x => x.Key, x => x.Select(error => error.Description).ToArray()));
-    await userManager.AddToRoleAsync(user, "User");
-    dbContext.EmergencyProfiles.Add(new EmergencyProfile { OwnerId = user.Id, PreferredLanguage = user.PreferredLanguage });
-    await dbContext.SaveChangesAsync(cancellationToken);
+    var roleResult = await userManager.AddToRoleAsync(user, "User");
+    if (!roleResult.Succeeded)
+    {
+        await userManager.DeleteAsync(user);
+        return Results.ValidationProblem(roleResult.Errors.GroupBy(x => x.Code).ToDictionary(x => x.Key, x => x.Select(error => error.Description).ToArray()));
+    }
+    try
+    {
+        dbContext.EmergencyProfiles.Add(new EmergencyProfile { OwnerId = user.Id, PreferredLanguage = user.PreferredLanguage });
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+    catch
+    {
+        await userManager.DeleteAsync(user);
+        throw;
+    }
     var pair = await tokenService.IssueAsync(user, cancellationToken);
     AuthCookies.Set(context.Response, pair, secure: !app.Environment.IsDevelopment() || context.Request.IsHttps);
     return Results.Created("/api/v1/auth/me", new AuthUserResponse(user.Id, user.Email!, user.PreferredLanguage, pair.AccessExpiresAtUtc));
@@ -368,10 +394,11 @@ sessions.MapGet("/", async (int? limit, DateTime? beforeUtc, HttpContext context
 
 sessions.MapPost("/", async (CreateSessionRequest request, HttpContext context, SessionCoordinator coordinator, CancellationToken cancellationToken) =>
 {
-    if (request.CountryCode.Length != 2 || !request.CountryCode.All(char.IsAsciiLetter) || request.TypedLocation?.Length > 300)
+    if (string.IsNullOrWhiteSpace(request.CountryCode) || request.CountryCode.Length != 2 || !request.CountryCode.All(char.IsAsciiLetter) || request.TypedLocation?.Length > 300)
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["session"] = ["Country code or typed location is invalid."] });
     var ownerId = TryGetUserId(context.User);
-    var response = await coordinator.CreateAsync(ownerId, request, cancellationToken);
+    var idempotencyKey = context.Request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty;
+    var response = await coordinator.CreateAsync(ownerId, request, idempotencyKey, cancellationToken);
     return Results.Created($"/api/v1/sessions/{response.Id}", response);
 }).AllowAnonymous().RequireRateLimiting("anonymous-start");
 
@@ -379,23 +406,41 @@ sessions.MapGet("/{sessionId:guid}", async (Guid sessionId, HttpContext context,
     Results.Ok(await coordinator.GetAsync(sessionId, TryGetUserId(context.User), GetAnonymousSessionToken(context.Request), cancellationToken))).AllowAnonymous();
 
 sessions.MapPost("/{sessionId:guid}/incident", async (Guid sessionId, SubmitIncidentRequest request, HttpContext context, SessionCoordinator coordinator, CancellationToken cancellationToken) =>
-    Results.Ok(await coordinator.SubmitIncidentAsync(sessionId, TryGetUserId(context.User), request, cancellationToken, GetAnonymousSessionToken(context.Request)))).AllowAnonymous().RequireRateLimiting("anonymous-start");
+    Results.Ok(await coordinator.SubmitIncidentAsync(sessionId, TryGetUserId(context.User), request,
+        context.Request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty, cancellationToken, GetAnonymousSessionToken(context.Request)))).AllowAnonymous().RequireRateLimiting("anonymous-start");
 
 sessions.MapPost("/{sessionId:guid}/voice", async Task<IResult> (Guid sessionId, HttpRequest request, HttpContext context, ISpeechToTextProvider speech, SessionCoordinator coordinator, CancellationToken cancellationToken) =>
 {
     if (!request.HasFormContentType) return Results.Problem(statusCode: 415, title: "Multipart audio upload required");
+    if (request.ContentLength is > 5_505_024) return Results.Problem(statusCode: 413, title: "Audio upload is too large");
     var form = await request.ReadFormAsync(cancellationToken);
     var audio = form.Files.GetFile("audio");
     if (audio is null || audio.Length == 0) return Results.ValidationProblem(new Dictionary<string, string[]> { ["audio"] = ["A non-empty audio recording is required."] });
     if (audio.Length > 5 * 1024 * 1024) return Results.Problem(statusCode: 413, title: "Audio upload is too large");
     var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "audio/webm", "audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp4", "audio/ogg" };
     if (!allowed.Contains(audio.ContentType)) return Results.Problem(statusCode: 415, title: "Unsupported audio format");
+    if (!await HasValidAudioSignatureAsync(audio, cancellationToken)) return Results.Problem(statusCode: 415, title: "Audio content does not match its declared format");
     await using var stream = audio.OpenReadStream();
     var transcription = await speech.TranscribeAsync(stream, audio.ContentType, form["languageHint"].FirstOrDefault(), cancellationToken);
     var response = await coordinator.SubmitIncidentAsync(sessionId, TryGetUserId(context.User),
-        new SubmitIncidentRequest(transcription.OriginalTranscript, transcription.DetectedLanguage, null), cancellationToken, GetAnonymousSessionToken(request));
+        new SubmitIncidentRequest(transcription.OriginalTranscript, transcription.DetectedLanguage, null),
+        request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty, cancellationToken, GetAnonymousSessionToken(request));
     return Results.Ok(response);
-}).AllowAnonymous().RequireRateLimiting("anonymous-start").DisableAntiforgery();
+}).AllowAnonymous().RequireRateLimiting("anonymous-start").DisableAntiforgery()
+    .WithMetadata(new RequestSizeLimitAttribute(5_505_024), new RequestFormLimitsAttribute { MultipartBodyLengthLimit = 5_505_024 });
+
+sessions.MapPost("/{sessionId:guid}/protocol-audio", async Task<IResult> (
+    Guid sessionId,
+    HttpContext context,
+    SessionCoordinator coordinator,
+    ITextToSpeechProvider speech,
+    CancellationToken cancellationToken) =>
+{
+    var session = await coordinator.GetAsync(sessionId, TryGetUserId(context.User), GetAnonymousSessionToken(context.Request), cancellationToken);
+    if (session.Protocol is null) return Results.Problem(statusCode: 409, title: "Select a reviewed protocol before requesting read-aloud audio");
+    var audio = await speech.SynthesizeAsync(CreateApprovedProtocolNarration(session.Protocol), session.OriginalLanguage ?? "en", cancellationToken);
+    return Results.Stream(audio, "audio/mpeg", enableRangeProcessing: false);
+}).AllowAnonymous().RequireRateLimiting("anonymous-start");
 
 sessions.MapPost("/{sessionId:guid}/answers", async Task<IResult> (Guid sessionId, CriticalAnswersRequest request, HttpContext context, SessionCoordinator coordinator, CancellationToken cancellationToken) =>
 {
@@ -405,15 +450,9 @@ sessions.MapPost("/{sessionId:guid}/answers", async Task<IResult> (Guid sessionI
             : new Dictionary<string, string>());
     if (answers.Count is 0 or > 3 || answers.Any(x => string.IsNullOrWhiteSpace(x.Key) || string.IsNullOrWhiteSpace(x.Value) || x.Key.Length > 80 || x.Value.Length > 500))
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["answers"] = ["Provide one to three bounded critical answers."] });
-    SessionResponse? response = null;
-    foreach (var answer in answers.OrderBy(x => x.Key, StringComparer.Ordinal))
-    {
-        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(answer.Value)))[..16];
-        response = await coordinator.AddTimelineAsync(sessionId, TryGetUserId(context.User),
-            new TimelineUpdateRequest("critical-answer", $"Critical question {answer.Key} was answered and recorded.", $"answer:{answer.Key}:{digest}"),
-            cancellationToken, GetAnonymousSessionToken(context.Request));
-    }
-    return Results.Ok(response);
+    var idempotencyKey = context.Request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty;
+    return Results.Ok(await coordinator.ApplyCriticalAnswersAsync(sessionId, TryGetUserId(context.User), answers, idempotencyKey,
+        GetAnonymousSessionToken(context.Request), cancellationToken));
 }).AllowAnonymous().RequireRateLimiting("anonymous-start");
 
 sessions.MapPost("/{sessionId:guid}/timeline", async (Guid sessionId, TimelineUpdateRequest request, HttpContext context, SessionCoordinator coordinator, CancellationToken cancellationToken) =>
@@ -458,9 +497,18 @@ sessions.MapPost("/{sessionId:guid}/close", async (Guid sessionId, CloseSessionR
 api.MapGet("/bystander/{token}", async (string token, ShareTokenCoordinator coordinator, CancellationToken cancellationToken) =>
     Results.Ok(await coordinator.GetProjectionAsync(token, cancellationToken))).AllowAnonymous().RequireRateLimiting("bystander");
 
+api.MapGet("/bystander", async (HttpRequest request, ShareTokenCoordinator coordinator, CancellationToken cancellationToken) =>
+    Results.Ok(await coordinator.GetProjectionAsync(GetBystanderShareToken(request), cancellationToken))).AllowAnonymous().RequireRateLimiting("bystander");
+
 api.MapPost("/bystander/{token}/observations", async (string token, BystanderObservationRequest request, HttpContext context, ShareTokenCoordinator coordinator, CancellationToken cancellationToken) =>
 {
     await coordinator.RecordObservationAsync(token, request, context.Request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty, cancellationToken);
+    return Results.Accepted();
+}).AllowAnonymous().RequireRateLimiting("bystander");
+
+api.MapPost("/bystander/observations", async (BystanderObservationRequest request, HttpContext context, ShareTokenCoordinator coordinator, CancellationToken cancellationToken) =>
+{
+    await coordinator.RecordObservationAsync(GetBystanderShareToken(context.Request), request, context.Request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty, cancellationToken);
     return Results.Accepted();
 }).AllowAnonymous().RequireRateLimiting("bystander");
 
@@ -470,8 +518,15 @@ api.MapPost("/bystander/{token}/location", async (string token, BystanderLocatio
     return Results.Accepted();
 }).AllowAnonymous().RequireRateLimiting("bystander");
 
+api.MapPost("/bystander/location", async (BystanderLocationRequest request, HttpContext context, ShareTokenCoordinator coordinator, CancellationToken cancellationToken) =>
+{
+    await coordinator.RecordLocationAsync(GetBystanderShareToken(context.Request), request, context.Request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty, cancellationToken);
+    return Results.Accepted();
+}).AllowAnonymous().RequireRateLimiting("bystander");
+
 api.MapPost("/webhooks/{provider}", async Task<IResult> (string provider, HttpRequest request, WebhookCoordinator coordinator, CancellationToken cancellationToken) =>
 {
+    if (request.ContentLength is > 65_536) return Results.Problem(statusCode: 413, title: "Webhook payload is too large");
     using var buffer = new MemoryStream();
     await request.Body.CopyToAsync(buffer, cancellationToken);
     if (buffer.Length > 65_536) return Results.Problem(statusCode: 413, title: "Webhook payload is too large");
@@ -480,7 +535,7 @@ api.MapPost("/webhooks/{provider}", async Task<IResult> (string provider, HttpRe
     var signature = request.Headers["X-GoldenHour-Signature"].FirstOrDefault() ?? string.Empty;
     var result = await coordinator.ProcessAsync(provider, deliveryId, timestamp, signature, buffer.ToArray(), cancellationToken);
     return Results.Accepted(value: result);
-}).AllowAnonymous().RequireRateLimiting("bystander");
+}).AllowAnonymous().RequireRateLimiting("bystander").WithMetadata(new RequestSizeLimitAttribute(65_536));
 
 app.MapHub<EmergencyHub>("/hubs/emergency");
 var spaIndex = Path.Combine(app.Environment.WebRootPath ?? Path.Combine(app.Environment.ContentRootPath, "wwwroot"), "index.html");
@@ -512,6 +567,40 @@ static Guid RequireUserId(ClaimsPrincipal principal) =>
 
 static string? GetAnonymousSessionToken(HttpRequest request) =>
     request.Headers["X-Emergency-Access-Token"].FirstOrDefault();
+
+static string GetBystanderShareToken(HttpRequest request)
+{
+    var token = request.Headers["X-Emergency-Share-Token"].FirstOrDefault();
+    if (string.IsNullOrWhiteSpace(token) || token.Length > 256)
+        throw new UnauthorizedAccessException("A valid emergency share token is required.");
+    return token;
+}
+
+static async Task<bool> HasValidAudioSignatureAsync(IFormFile audio, CancellationToken cancellationToken)
+{
+    var header = new byte[12];
+    await using var stream = audio.OpenReadStream();
+    var read = await stream.ReadAsync(header, cancellationToken);
+    return audio.ContentType.ToLowerInvariant() switch
+    {
+        "audio/webm" => read >= 4 && header.AsSpan(0, 4).SequenceEqual(new byte[] { 0x1A, 0x45, 0xDF, 0xA3 }),
+        "audio/wav" or "audio/x-wav" => read >= 12 && header.AsSpan(0, 4).SequenceEqual("RIFF"u8) && header.AsSpan(8, 4).SequenceEqual("WAVE"u8),
+        "audio/mpeg" => read >= 3 && (header.AsSpan(0, 3).SequenceEqual("ID3"u8) || (header[0] == 0xFF && (header[1] & 0xE0) == 0xE0)),
+        "audio/mp4" => read >= 8 && header.AsSpan(4, 4).SequenceEqual("ftyp"u8),
+        "audio/ogg" => read >= 4 && header.AsSpan(0, 4).SequenceEqual("OggS"u8),
+        _ => false
+    };
+}
+
+static string CreateApprovedProtocolNarration(ProtocolResponse protocol)
+{
+    var builder = new StringBuilder();
+    builder.Append(protocol.Notice).Append(' ').Append(protocol.EmergencyCallInstruction);
+    foreach (var action in protocol.DoActions) builder.Append(" Do: ").Append(action);
+    foreach (var action in protocol.DoNotActions) builder.Append(" Do not: ").Append(action);
+    builder.Append(' ').Append(protocol.EscalationRule);
+    return builder.ToString();
+}
 
 static Dictionary<string, string[]> ValidateProfile(ProfileUpsertRequest request)
 {

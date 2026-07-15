@@ -103,6 +103,12 @@ export function removeMinimalOfflineCard(): void {
   window.localStorage.removeItem(CARD_KEY);
 }
 
+export function clearUserScopedOfflineData(): void {
+  window.localStorage.removeItem(CARD_KEY);
+  window.localStorage.removeItem(QUEUE_KEY);
+  window.dispatchEvent(new CustomEvent('gh-queue-changed'));
+}
+
 export function getMinimalOfflineCard(): MinimalOfflineCard | null {
   if (typeof window === 'undefined') return null;
   return readJson<MinimalOfflineCard | null>(CARD_KEY, null);

@@ -91,6 +91,28 @@ public sealed class SameOriginMutationMiddleware(RequestDelegate next, IWebHostE
     }
 }
 
+public sealed class SensitiveResponseCacheMiddleware(RequestDelegate next)
+{
+    public async Task InvokeAsync(HttpContext context)
+    {
+        var sensitive = context.Request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase)
+            || context.Request.Path.StartsWithSegments("/emergency", StringComparison.OrdinalIgnoreCase)
+            || context.Request.Path.StartsWithSegments("/share", StringComparison.OrdinalIgnoreCase)
+            || context.Request.Path.StartsWithSegments("/bystander", StringComparison.OrdinalIgnoreCase);
+        if (sensitive)
+        {
+            context.Response.OnStarting(() =>
+            {
+                context.Response.Headers.CacheControl = "no-store, private";
+                context.Response.Headers.Pragma = "no-cache";
+                return Task.CompletedTask;
+            });
+        }
+
+        await next(context);
+    }
+}
+
 public sealed class SecurityHeadersMiddleware(RequestDelegate next)
 {
     public async Task InvokeAsync(HttpContext context)

@@ -1,0 +1,17 @@
+{
+  "name": "@golden-hour/e2e",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:e2e:mock": "playwright test --project=mock-desktop --project=mock-mobile",
+    "test:e2e:real": "playwright test --project=real-api"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.2",
+    "@playwright/test": "^1.54.1",
+    "@types/node": "^24.0.10",
+    "typescript": "~5.8.3"
+  }
+}

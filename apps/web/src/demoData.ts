@@ -64,6 +64,18 @@ export const demoSession: EmergencySession = {
   normalizedInput: 'My father suddenly has chest pain, heavy sweating, and difficulty speaking.',
   extraction: demoExtraction,
   participants: ['Asha · with patient', 'Vikram · connected remotely'],
+  participantDetails: [
+    { id: 'participant-asha', displayName: 'Asha · with patient', role: 'owner', acknowledgedAtUtc: '2026-07-15T17:18:00.000Z' },
+    { id: 'participant-vikram', displayName: 'Vikram · connected remotely', role: 'family', acknowledgedAtUtc: '2026-07-15T17:20:00.000Z' },
+  ],
+  patientSnapshot: {
+    fullName: 'Raj Kumar', approximateAge: 64, allergies: demoProfile.allergies, conditions: demoProfile.conditions, medications: demoProfile.medicines,
+    procedures: [{ name: 'Angioplasty (self-reported)', year: 2024 }], emergencyContact: { name: 'Asha Kumar', relationship: 'Daughter', phoneNumber: '+91 ••••• 41012' }, capturedAtUtc: '2026-07-15T17:18:00.000Z', source: 'profile_snapshot',
+  },
+  observations: [
+    { id: 'observation-1', kind: 'conscious', value: 'yes', source: 'user', isConfirmed: true, createdAtUtc: '2026-07-15T17:19:30.000Z' },
+    { id: 'observation-2', kind: 'breathing_normally', value: 'unknown', source: 'ai', isConfirmed: false, createdAtUtc: '2026-07-15T17:19:31.000Z' },
+  ],
   protocolVersion: 'chest-pain/demo-2026.07',
   sharingFields: demoProfile.shareFields,
   tasks: [
@@ -106,7 +118,7 @@ export const emptyProfile: EmergencyProfile = {
 export const emptySession: EmergencySession = {
   id: '', owner: '', patient: '', relationship: 'unknown', category: 'unknown', status: 'active', createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), location: '', originalInput: '', normalizedInput: '',
   extraction: { detectedLanguage: 'unknown', languageConfidence: 0, incidentCategory: 'unknown', patientRelationship: 'unknown', observations: [], reportedSymptomStartTime: null, isConscious: 'unknown', isBreathingNormally: 'unknown', isHeavyBleedingReported: 'unknown', locationDescription: null, urgencyClassification: 'unknown', criticalMissingQuestions: [], handoverFacts: [], uncertainties: ['No incident interpretation is available.'], confidence: 0 },
-  timeline: [], tasks: [], participants: [], participantOptions: [], protocolVersion: '', sharingFields: [], emergencyNumber: '112', concurrencyToken: '',
+  timeline: [], tasks: [], participants: [], participantOptions: [], participantDetails: [], patientSnapshot: null, observations: [], protocolVersion: '', sharingFields: [], emergencyNumber: '112', concurrencyToken: '',
 };
 
 export const categoryLabels: Record<EmergencySession['category'], string> = {

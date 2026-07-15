@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { CheckCircle2, LockKeyhole, Phone } from 'lucide-react';
 import { ApiError, MOCK_MODE, api } from '../api';
 import { emergencyNumber, PageHeading } from '../components/AppShell';
@@ -17,8 +17,8 @@ export function LandingPage() {
   const navigate = useNavigate();
 
   const openDemo = () => {
-    if (MOCK_MODE) { setAuthenticated(true); navigate('/home'); }
-    else navigate('/login');
+    if (MOCK_MODE) { setAuthenticated(true); void navigate('/home'); }
+    else void navigate('/login');
   };
 
   return (
@@ -39,10 +39,10 @@ export function LandingPage() {
           <Link className="button button--ghost" to="/login">{t('landing.signIn')}</Link>
         </div>
       </div>
-      <aside className="card card--raised stack" aria-label="Product safety summary">
+      <aside className="card card--raised stack" aria-label={t('landing.safetySummary')}>
         <span className="brand__mark" aria-hidden="true"><LockKeyhole /></span>
-        <div><p className="eyebrow">Privacy by default</p><h2>Only share what helps right now.</h2></div>
-        <p>Emergency links are time-bound and limited. Insurance, private documents, and home address stay hidden by default.</p>
+        <div><p className="eyebrow">{t('landing.privacyEyebrow')}</p><h2>{t('landing.privacyTitle')}</h2></div>
+        <p>{t('landing.privacyBody')}</p>
         <p className="safety-note">{t('landing.safety')}</p>
       </aside>
     </section>
@@ -72,18 +72,26 @@ export function AnonymousEmergencyPage() {
     finally { setPending(false); }
   };
   if (session) {
-    const protocol = session.protocol ?? protocolQuery.data;
-    return <div><PageHeading eyebrow={t('bystander.limited')} title={t('action.title')} description={t('bystander.privateToken')} /><a className="button button--danger button--full" href={`tel:${session.emergencyNumber || number}`}><Phone aria-hidden="true" />{t('common.call', { number: session.emergencyNumber || number })}</a>{protocol && <section className="card card--raised section"><h2>{protocol.emergencyCallInstruction}</h2><ol className="plain-list">{protocol.doActions.map((action) => <li key={action.id}><strong>{action.title}</strong><p>{action.detail}</p></li>)}</ol><p className="disclaimer">{protocol.disclaimer}</p></section>}</div>;
+    const protocol = protocolQuery.data ?? session.protocol;
+    return <div><PageHeading eyebrow={t('bystander.limited')} title={t('action.title')} description={t('bystander.privateToken')} /><a className="button button--danger button--full" href={`tel:${session.emergencyNumber || number}`}><Phone aria-hidden="true" />{t('common.call', { number: session.emergencyNumber || number })}</a>{protocol && <section className="card card--raised section"><h2>{protocol.emergencyCallInstruction}</h2><ol className="plain-list">{protocol.doActions.map((action) => <li key={action.id}><strong>{action.title}</strong><p>{action.detail}</p></li>)}</ol><h3>{t('action.doNot')}</h3><ul className="plain-list">{protocol.doNotActions.map((action) => <li key={action}>{action}</li>)}</ul><h3>{t('action.escalation')}</h3><p>{protocol.escalationRule}</p><p className="disclaimer">{protocol.disclaimer}</p></section>}</div>;
   }
-  return <div><PageHeading title={t('landing.nearby')} description={t('bystander.anonymousIntro')} /><form className="form-grid" onSubmit={(event) => void submit(event)}><fieldset className="fieldset"><legend>{t('start.category')}</legend><div className="category-grid">{incidentCategories.map((item) => <label className="choice-card" key={item}><input type="radio" name="public-category" checked={category === item} onChange={() => setCategory(item)} /><span>{t(publicCategoryKeys[item])}</span></label>)}</div></fieldset><div className="field"><label htmlFor="public-description">{t('capture.typed')}</label><textarea id="public-description" value={description} onChange={(event) => setDescription(event.target.value)} maxLength={2_000} required /></div><div className="field"><label htmlFor="public-location">{t('capture.manualLocation')}</label><input id="public-location" value={location} onChange={(event) => setLocation(event.target.value)} maxLength={300} /></div>{error && <p className="field-error" role="alert">{error}</p>}<button className="button" type="submit" disabled={pending}>{pending ? t('common.loading') : t('bystander.submit')}</button></form></div>;
+  return <div><PageHeading title={t('landing.nearby')} description={t('bystander.anonymousIntro')} /><form className="form-grid" onSubmit={(event) => void submit(event)}><fieldset className="fieldset"><legend>{t('start.category')}</legend><div className="category-grid">{incidentCategories.map((item) => <label className="choice-card" key={item}><input type="radio" name="public-category" checked={category === item} onChange={() => setCategory(item)} /><span>{t(publicCategoryKeys[item])}</span></label>)}</div></fieldset><div className="field"><label htmlFor="public-description">{t('capture.typed')}</label><textarea id="public-description" value={description} onChange={(event) => setDescription(event.target.value)} maxLength={12_000} required /></div><div className="field"><label htmlFor="public-location">{t('capture.manualLocation')}</label><input id="public-location" value={location} onChange={(event) => setLocation(event.target.value)} maxLength={300} /></div>{error && <p className="field-error" role="alert">{error}</p>}<button className="button" type="submit" disabled={pending}>{pending ? t('common.loading') : t('bystander.submit')}</button></form></div>;
 }
 
 interface AuthPageProps { mode: 'login' | 'register' }
 
+function safeInviteDestination(state: unknown): string | null {
+  if (!state || typeof state !== 'object' || !('from' in state)) return null;
+  const requested = (state as { from?: unknown }).from;
+  return typeof requested === 'string' && /^\/emergency\/[a-z0-9-]{1,80}\/join#[^#/?]{16,512}$/i.test(requested) ? requested : null;
+}
+
 export function AuthPage({ mode }: AuthPageProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const location = useLocation();
   const { setAuthenticated } = useAppState();
+  const inviteDestination = safeInviteDestination(location.state as unknown);
   const [error, setError] = useState('');
   const [pending, setPending] = useState(false);
 
@@ -91,10 +99,11 @@ export function AuthPage({ mode }: AuthPageProps) {
     event.preventDefault();
     setError('');
     const data = new FormData(event.currentTarget);
-    const email = String(data.get('email') ?? '').trim();
-    const password = String(data.get('password') ?? '');
-    const name = String(data.get('name') ?? '').trim();
-    const confirmation = String(data.get('confirmPassword') ?? '');
+    const value = (key: string) => { const field = data.get(key); return typeof field === 'string' ? field : ''; };
+    const email = value('email').trim();
+    const password = value('password');
+    const name = value('name').trim();
+    const confirmation = value('confirmPassword');
     const strongPassword = password.length >= 12 && /[a-z]/.test(password) && /[A-Z]/.test(password) && /\d/.test(password) && /[^A-Za-z0-9]/.test(password);
     if (!email || !strongPassword || (mode === 'register' && (!name || confirmation !== password))) {
       setError(t('auth.invalid'));
@@ -105,7 +114,7 @@ export function AuthPage({ mode }: AuthPageProps) {
       if (mode === 'login') await api.login(email, password);
       else await api.register(name, email, password);
       setAuthenticated(true);
-      navigate(mode === 'register' ? '/onboarding' : '/home');
+      void navigate(inviteDestination ?? (mode === 'register' ? '/onboarding' : '/home'), { replace: true });
     } catch (requestError) {
       setError(mode === 'register' && requestError instanceof ApiError ? requestError.message : t('auth.invalid'));
     } finally {
@@ -127,7 +136,7 @@ export function AuthPage({ mode }: AuthPageProps) {
           <button className="button button--full" type="submit" disabled={pending}>{pending ? t('common.loading') : mode === 'login' ? t('auth.signIn') : t('auth.create')}</button>
         </form>
         <p className="field-hint">{t('auth.privacy')}</p>
-        <p>{mode === 'login' ? <Link to="/register">{t('landing.create')}</Link> : <Link to="/login">{t('landing.signIn')}</Link>}</p>
+        <p>{mode === 'login' ? <Link to="/register" state={inviteDestination ? { from: inviteDestination } : undefined}>{t('landing.create')}</Link> : <Link to="/login" state={inviteDestination ? { from: inviteDestination } : undefined}>{t('landing.signIn')}</Link>}</p>
       </div>
     </section>
   );

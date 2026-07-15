@@ -41,7 +41,7 @@ public sealed class ParticipantCoordinator(
         });
         dbContext.AuditEvents.Add(new AuditEvent { ActorUserId = ownerId, Action = "participant-invited", ResourceType = "EmergencyParticipant", ResourceId = participant.Id.ToString() });
         await dbContext.SaveChangesAsync(cancellationToken);
-        return new ParticipantInviteResponse(participant.Id, raw, expires, $"/emergency/join/{raw}");
+        return new ParticipantInviteResponse(participant.Id, raw, expires, $"/emergency/{sessionId}/join#{raw}");
     }
 
     public async Task<ParticipantResponse> JoinAsync(Guid sessionId, Guid userId, string rawToken, CancellationToken cancellationToken)
@@ -59,7 +59,6 @@ public sealed class ParticipantCoordinator(
         var alreadyJoined = await dbContext.EmergencyParticipants.AnyAsync(x => x.EmergencySessionId == sessionId && x.UserId == userId && x.Id != participant.Id, cancellationToken);
         if (alreadyJoined) throw new InvalidOperationException("User already participates in this session.");
         participant.UserId = userId;
-        participant.AcknowledgedAtUtc = clock.UtcNow;
         invite.RevokedAtUtc = clock.UtcNow;
         var sequence = await dbContext.EmergencyTimelineEvents.Where(x => x.EmergencySessionId == sessionId).Select(x => (long?)x.Sequence).MaxAsync(cancellationToken) ?? 0;
         dbContext.EmergencyTimelineEvents.Add(new EmergencyTimelineEvent

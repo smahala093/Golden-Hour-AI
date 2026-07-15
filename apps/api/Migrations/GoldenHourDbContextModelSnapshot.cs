@@ -26,7 +26,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.AiOperation", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -79,7 +78,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.Allergy", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -112,7 +110,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.AuditEvent", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<string>("Action")
@@ -157,7 +154,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.EmergencyContact", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -201,7 +197,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.EmergencyLocation", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -239,7 +234,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.EmergencyObservation", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -280,7 +274,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.EmergencyParticipant", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<DateTime?>("AcknowledgedAtUtc")
@@ -322,7 +315,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.EmergencyProfile", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<bool>("AllergyStatusCompleted")
@@ -387,7 +379,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.EmergencySession", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<decimal?>("AiConfidence")
@@ -400,6 +391,14 @@ namespace GoldenHour.Api.Migrations
                     b.Property<string>("CountryCode")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<byte[]>("CreateIdempotencyKeyHash")
+                        .HasMaxLength(32)
+                        .HasColumnType("bytea");
+
+                    b.Property<byte[]>("CreateRequestHash")
+                        .HasMaxLength(32)
+                        .HasColumnType("bytea");
 
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
@@ -454,6 +453,9 @@ namespace GoldenHour.Api.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("CreateIdempotencyKeyHash")
+                        .IsUnique();
+
                     b.HasIndex("OwnerId", "Status", "UpdatedAtUtc");
 
                     b.ToTable("EmergencySessions", "golden_hour");
@@ -462,7 +464,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.EmergencyShareToken", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -515,7 +516,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.EmergencySummary", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -558,7 +558,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.EmergencyTask", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<DateTime?>("AcceptedAtUtc")
@@ -613,7 +612,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.EmergencyTimelineEvent", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid?>("ActorUserId")
@@ -662,7 +660,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.MedicalCondition", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -695,7 +692,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.MedicalProcedure", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -731,7 +727,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.Medication", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -764,7 +759,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.NotificationDelivery", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -803,7 +797,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.OutboxMessage", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<int>("Attempts")
@@ -843,7 +836,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.PreferredHospital", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -877,7 +869,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.RefreshToken", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -923,7 +914,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.SharingPreference", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")
@@ -971,7 +961,6 @@ namespace GoldenHour.Api.Migrations
             modelBuilder.Entity("GoldenHour.Api.Domain.WebhookReceipt", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ConcurrencyToken")

@@ -97,6 +97,9 @@ public sealed class GoldenHourDbContext(
 
         builder.Entity<EmergencySession>(entity =>
         {
+            entity.Property(x => x.CreateIdempotencyKeyHash).HasMaxLength(32);
+            entity.Property(x => x.CreateRequestHash).HasMaxLength(32);
+            entity.HasIndex(x => x.CreateIdempotencyKeyHash).IsUnique();
             entity.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
             entity.Property(x => x.PatientRelationship).HasConversion<string>().HasMaxLength(32);
             entity.Property(x => x.SelectedCategory).HasConversion<string>().HasMaxLength(48);
@@ -205,6 +208,7 @@ public sealed class GoldenHourDbContext(
 
     private static void ConfigureEntity<TEntity>(ModelBuilder builder) where TEntity : Entity
     {
+        builder.Entity<TEntity>().Property(x => x.Id).ValueGeneratedNever();
         builder.Entity<TEntity>().Property(x => x.ConcurrencyToken).IsConcurrencyToken();
     }
 }

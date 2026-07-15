@@ -35,6 +35,12 @@ jobs:
             global.json
       - name: Restore
         run: dotnet restore GoldenHourAI.sln
+      - name: Audit direct and transitive NuGet packages
+        run: >-
+          dotnet list GoldenHourAI.sln package
+          --vulnerable
+          --include-transitive
+          --configfile NuGet.Config
       - name: Build with analyzers
         run: dotnet build GoldenHourAI.sln --configuration Release --no-restore
       - name: Test with coverage
@@ -70,6 +76,8 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - name: Install locked dependencies
         run: npm ci --prefix apps/web
+      - name: Audit production web dependencies
+        run: npm audit --prefix apps/web --omit=dev --audit-level=high
       - name: Lint
         run: npm run lint --prefix apps/web
       - name: Strict typecheck

@@ -59,9 +59,11 @@ param jwtIssuer string = 'GoldenHourAI'
 @description('Application JWT audience.')
 param jwtAudience string = 'GoldenHourAI.Web'
 
-@description('Minimum and maximum API replicas.')
+@description('Prototype API replica count. Keep this at one until the application is wired to Azure SignalR and a distributed outbox lease.')
+@allowed([1])
 param minReplicas int = 1
-param maxReplicas int = 3
+@allowed([1])
+param maxReplicas int = 1
 
 @description('Resource tags merged with the standard application/environment tags.')
 param tags object = {}

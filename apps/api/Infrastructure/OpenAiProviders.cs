@@ -14,6 +14,8 @@ public sealed class OpenAiOptions
     public string BaseUrl { get; set; } = "https://api.openai.com/v1/";
     public string Model { get; set; } = "gpt-4.1-mini";
     public string SpeechModel { get; set; } = "gpt-4o-mini-transcribe";
+    public string TextToSpeechModel { get; set; } = "gpt-4o-mini-tts";
+    public string TextToSpeechVoice { get; set; } = "alloy";
     public string ApiKey { get; set; } = string.Empty;
     public int TimeoutSeconds { get; set; } = 15;
 }
@@ -251,5 +253,56 @@ public sealed class OpenAiSpeechToTextProvider(
             ? detected.GetString() ?? languageHint ?? "und"
             : languageHint ?? "und";
         return new SpeechTranscription(transcript, language, language == "und" ? 0.5m : 0.9m);
+    }
+}
+
+public sealed class OpenAiTextToSpeechProvider(
+    HttpClient httpClient,
+    IOptions<OpenAiOptions> options) : ITextToSpeechProvider
+{
+    private const int MaximumInputCharacters = 4096;
+    private const int MaximumAudioBytes = 5 * 1024 * 1024;
+
+    public async Task<Stream> SynthesizeAsync(string approvedText, string language, CancellationToken cancellationToken)
+    {
+        _ = language;
+        if (string.IsNullOrWhiteSpace(approvedText) || approvedText.Length > MaximumInputCharacters)
+            throw new InvalidDataException("Approved speech text must contain 1 to 4096 characters.");
+        if (string.IsNullOrWhiteSpace(options.Value.ApiKey))
+            throw new AiProviderException("not_configured", "OpenAI text-to-speech is not configured.");
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "audio/speech")
+        {
+            Content = JsonContent.Create(new
+            {
+                model = options.Value.TextToSpeechModel,
+                input = approvedText,
+                voice = options.Value.TextToSpeechVoice,
+                response_format = "mp3"
+            })
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.Value.ApiKey);
+        using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new AiProviderException("speech_provider_error", "Text-to-speech was unavailable.");
+        if (response.Content.Headers.ContentLength is > MaximumAudioBytes)
+            throw new AiProviderException("speech_output_too_large", "Text-to-speech output exceeded the safe limit.");
+
+        await using var providerStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        var output = new MemoryStream();
+        var buffer = new byte[16_384];
+        while (true)
+        {
+            var read = await providerStream.ReadAsync(buffer, cancellationToken);
+            if (read == 0) break;
+            if (output.Length + read > MaximumAudioBytes)
+            {
+                await output.DisposeAsync();
+                throw new AiProviderException("speech_output_too_large", "Text-to-speech output exceeded the safe limit.");
+            }
+            await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+        }
+        output.Position = 0;
+        return output;
     }
 }

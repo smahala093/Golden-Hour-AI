@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { AlertCircle, Clock3, HeartPulse, Home, Menu, Phone, Settings, ShieldCheck, Wifi, WifiOff, X } from 'lucide-react';
-import { MOCK_MODE } from '../api';
+import { MOCK_MODE, api } from '../api';
 import { flushQueuedUpdates } from '../offline';
 import { useAppState } from '../state';
 
@@ -14,10 +14,12 @@ export function emergencyNumber(): string {
 function EmergencyCallDock() {
   const { t } = useTranslation();
   const [announcement, setAnnouncement] = useState('');
-  const number = emergencyNumber();
+  const { session } = useAppState();
+  const number = session.emergencyNumber || emergencyNumber();
 
   const handleCall = () => {
     setAnnouncement(t('action.callInitiated'));
+    if (session.id) void api.addTimeline(session.id, 'call-initiated', 'Emergency dial action initiated by the user; connection is not confirmed.').catch(() => undefined);
   };
 
   return (
@@ -80,7 +82,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <button className="icon-button menu-button" type="button" aria-expanded={menuOpen} aria-controls="primary-navigation" aria-label={menuOpen ? t('nav.closeMenu') : t('nav.menu')} onClick={() => setMenuOpen((open) => !open)}>
           {menuOpen ? <X aria-hidden="true" /> : <Menu aria-hidden="true" />}
         </button>
-        <nav id="primary-navigation" className={`primary-nav ${menuOpen ? 'primary-nav--open' : ''}`} aria-label="Primary navigation">
+        <nav id="primary-navigation" className={`primary-nav ${menuOpen ? 'primary-nav--open' : ''}`} aria-label={t('nav.primary')}>
           {navigation.map(({ to, key, icon: Icon }) => (
             <NavLink key={to} to={to} className={({ isActive }) => isActive ? 'nav-link nav-link--active' : 'nav-link'}>
               <Icon aria-hidden="true" size={20} /><span>{t(key)}</span>
@@ -126,5 +128,7 @@ export function ConnectionBanner({ state }: { state: 'connecting' | 'connected' 
 }
 
 export function SourceBadge({ source }: { source: string }) {
-  return <span className={`source-badge source-badge--${source}`}>{source.replace('-', ' ')}</span>;
+  const { t } = useTranslation();
+  const labelKey = ({ 'user-reported': 'source.userReported', profile: 'source.profile', 'ai-extracted': 'source.aiExtracted', confirmed: 'source.confirmed', unknown: 'source.unknown' } as Record<string, string>)[source];
+  return <span className={`source-badge source-badge--${source}`}>{labelKey ? t(labelKey) : source.replaceAll('-', ' ')}</span>;
 }

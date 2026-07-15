@@ -15,10 +15,6 @@ public static class DemoSeeder
             await dbContext.Database.EnsureCreatedAsync(cancellationToken);
         }
 
-        if (environment.IsProduction()) return;
-        var password = configuration["Seed:DemoPassword"];
-        if (string.IsNullOrWhiteSpace(password)) return;
-
         var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole<Guid>>>();
         foreach (var role in new[] { "User", "Caregiver", "EmergencyParticipant", "Administrator" })
         {
@@ -28,6 +24,10 @@ public static class DemoSeeder
                 if (!result.Succeeded) throw new InvalidOperationException($"Could not seed role {role}.");
             }
         }
+
+        if (environment.IsProduction()) return;
+        var password = configuration["Seed:DemoPassword"];
+        if (string.IsNullOrWhiteSpace(password)) return;
 
         var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
         var demo = await EnsureUserAsync(userManager, "demo@goldenhour.ai", password, "hi", "User");
@@ -97,7 +97,11 @@ public static class DemoSeeder
             var result = await manager.CreateAsync(user, password);
             if (!result.Succeeded) throw new InvalidOperationException($"Could not seed demo user {email}: {string.Join(", ", result.Errors.Select(x => x.Code))}");
         }
-        if (!await manager.IsInRoleAsync(user, role)) await manager.AddToRoleAsync(user, role);
+        if (!await manager.IsInRoleAsync(user, role))
+        {
+            var result = await manager.AddToRoleAsync(user, role);
+            if (!result.Succeeded) throw new InvalidOperationException($"Could not assign seeded user to role {role}.");
+        }
         return user;
     }
 }

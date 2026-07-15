@@ -7,7 +7,7 @@ RUN npm ci
 COPY apps/web/ ./
 RUN npm run build
 
-FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS api-build
+FROM mcr.microsoft.com/dotnet/sdk:10.0-alpine AS api-build
 WORKDIR /src
 COPY .config/dotnet-tools.json .config/dotnet-tools.json
 RUN dotnet tool restore

@@ -1,0 +1,13 @@
+{
+  "id": "seizure",
+  "version": "1.0.0",
+  "reviewStatus": "prototype-demonstration-clinical-review-required",
+  "country": "IN",
+  "notice": "Demonstration guidance requiring clinical review before production use.",
+  "emergencyCallInstruction": "Call 112, especially if this is the first known seizure, it continues, repeats, or the person is injured or has trouble breathing.",
+  "doActions": ["Clear nearby hazards and protect the person's head with something soft.", "Note when the seizure started.", "Stay nearby and follow the emergency operator's instructions."],
+  "doNotActions": ["Do not restrain the person.", "Do not put anything in the person's mouth.", "Do not give food, drink, or medicine."],
+  "escalationRule": "Report the duration, breathing changes, injury, or another seizure to 112.",
+  "source": "Prototype placeholder; clinical governance review required.",
+  "translationKeys": { "title": "protocol.seizure.title", "call": "protocol.common.call112" }
+}

@@ -1,0 +1,181 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+  NUGET_XMLDOC_MODE: skip
+
+jobs:
+  backend:
+    name: Backend build, tests, coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+          cache: true
+          cache-dependency-path: |
+            **/*.csproj
+            global.json
+      - name: Restore
+        run: dotnet restore GoldenHourAI.sln
+      - name: Build with analyzers
+        run: dotnet build GoldenHourAI.sln --configuration Release --no-restore
+      - name: Test with coverage
+        run: >-
+          dotnet test GoldenHourAI.sln
+          --configuration Release
+          --no-build
+          --logger "trx;LogFileName=tests.trx"
+          --collect:"XPlat Code Coverage"
+          --results-directory TestResults
+      - name: Enforce critical Domain/Application coverage
+        shell: pwsh
+        run: ./scripts/check-critical-coverage.ps1 -CoverageRoot TestResults -MinimumPercent 80
+      - name: Upload backend evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-results
+          path: TestResults/
+          if-no-files-found: error
+          retention-days: 14
+
+  web:
+    name: Web lint, typecheck, tests, PWA build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci --prefix apps/web
+      - name: Lint
+        run: npm run lint --prefix apps/web
+      - name: Strict typecheck
+        run: npm run typecheck --prefix apps/web
+      - name: Unit and accessibility tests with coverage
+        run: npm run test:coverage --prefix apps/web
+      - name: Build installable PWA
+        run: npm run build --prefix apps/web
+      - name: Upload web coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-coverage
+          path: apps/web/coverage/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload PWA build
+        uses: actions/upload-artifact@v4
+        with:
+          name: pwa-dist
+          path: apps/web/dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  e2e:
+    name: Playwright desktop and mobile journeys
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            tests/e2e/package-lock.json
+      - name: Restore API and install web/e2e dependencies
+        run: |
+          dotnet restore GoldenHourAI.sln
+          npm ci --prefix apps/web
+          npm ci --prefix tests/e2e
+      - name: Install Chromium
+        run: npm exec --prefix tests/e2e -- playwright install --with-deps chromium
+      - name: Run deterministic E2E journeys
+        env:
+          ASPNETCORE_ENVIRONMENT: Development
+          Providers__UseMocks: 'true'
+          Seed__DemoPassword: GoldenHour-CI-Demo-Only-2026!
+        run: npm run test:e2e --prefix tests/e2e
+      - name: Upload Playwright evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: |
+            tests/e2e/playwright-report/
+            tests/e2e/test-results/
+          if-no-files-found: warn
+          retention-days: 7
+
+  container:
+    name: Container and same-origin smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose resolution
+        env:
+          POSTGRES_PASSWORD: GoldenHour-CI-Postgres-Only-2026!
+          JWT_SIGNING_KEY: ci-only-signing-key-at-least-thirty-two-characters-2026
+          DEMO_PASSWORD: GoldenHour-CI-Demo-Only-2026!
+        run: docker compose config --quiet
+      - name: Build and start isolated stack
+        env:
+          POSTGRES_PASSWORD: GoldenHour-CI-Postgres-Only-2026!
+          JWT_SIGNING_KEY: ci-only-signing-key-at-least-thirty-two-characters-2026
+          DEMO_PASSWORD: GoldenHour-CI-Demo-Only-2026!
+        run: docker compose up --build --detach --wait
+      - name: Health and PWA smoke
+        shell: pwsh
+        run: |
+          ./infrastructure/scripts/health-check.ps1 -BaseUrl http://localhost:8080
+          ./infrastructure/scripts/smoke-test.ps1 -BaseUrl http://localhost:8080
+      - name: Container status on failure
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --no-color --tail 200 app
+      - name: Stop stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans
+
+  infrastructure:
+    name: Bicep and workflow syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Bicep
+        run: az bicep build --file infrastructure/bicep/main.bicep --outfile "${RUNNER_TEMP}/main.json"
+      - name: Parse workflow YAML
+        run: ruby -e "require 'yaml'; Dir['.github/workflows/*.{yml,yaml}'].each { |f| YAML.parse_file(f); puts \"parsed #{f}\" }"
+      - name: Parse example deployment parameters
+        shell: pwsh
+        run: Get-Content infrastructure/bicep/main.parameters.example.json -Raw | ConvertFrom-Json | Out-Null

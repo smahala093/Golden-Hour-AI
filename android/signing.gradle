@@ -1,0 +1,30 @@
+import java.util.Properties
+
+def signingPropertiesFile = rootProject.file('key.properties')
+if (!signingPropertiesFile.exists()) {
+    throw new GradleException('key.properties is required for a signed release and must not be committed.')
+}
+
+def signingProperties = new Properties()
+signingPropertiesFile.withInputStream { stream -> signingProperties.load(stream) }
+['storeFile', 'storePassword', 'keyAlias', 'keyPassword'].each { key ->
+    if (!signingProperties.getProperty(key)) {
+        throw new GradleException("Missing Android signing property: ${key}")
+    }
+}
+
+android {
+    signingConfigs {
+        release {
+            storeFile rootProject.file(signingProperties.getProperty('storeFile'))
+            storePassword signingProperties.getProperty('storePassword')
+            keyAlias signingProperties.getProperty('keyAlias')
+            keyPassword signingProperties.getProperty('keyPassword')
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+        }
+    }
+}

@@ -1,0 +1,13 @@
+{
+  "id": "suspected-allergic-reaction",
+  "version": "1.0.0",
+  "reviewStatus": "prototype-demonstration-clinical-review-required",
+  "country": "IN",
+  "notice": "Demonstration guidance requiring clinical review before production use.",
+  "emergencyCallInstruction": "Call 112 now for breathing difficulty, swelling, collapse, or rapidly worsening symptoms.",
+  "doActions": ["Keep the person with you and monitor breathing.", "Use only the person's stored clinician-approved emergency plan, if one exists.", "Follow the emergency operator's instructions."],
+  "doNotActions": ["Do not give unplanned medication.", "Do not leave the person alone."],
+  "escalationRule": "Tell 112 immediately if breathing, consciousness, or swelling worsens.",
+  "source": "Prototype placeholder; clinical governance review required.",
+  "translationKeys": { "title": "protocol.allergicReaction.title", "call": "protocol.common.call112" }
+}

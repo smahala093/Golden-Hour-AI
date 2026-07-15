@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Golden Hour AI sun and care mark">
+  <rect width="512" height="512" rx="112" fill="#fff9ef"/>
+  <circle cx="256" cy="256" r="160" fill="#f3b83f"/>
+  <path d="M239 139h34v100h100v34H273v100h-34V273H139v-34h100z" fill="#7f271f"/>
+  <circle cx="256" cy="256" r="190" fill="none" stroke="#a83a2a" stroke-width="24"/>
+</svg>

@@ -1,0 +1,13 @@
+{
+  "id": "chest-pain",
+  "version": "1.0.0",
+  "reviewStatus": "prototype-demonstration-clinical-review-required",
+  "country": "IN",
+  "notice": "Demonstration guidance requiring clinical review before production use.",
+  "emergencyCallInstruction": "Call 112 now for sudden or severe chest pain, sweating, breathing difficulty, collapse, or trouble speaking.",
+  "doActions": ["Help the person rest in a comfortable position.", "Stay with the person and watch breathing and responsiveness.", "Follow the emergency operator's instructions."],
+  "doNotActions": ["Do not let the person drive.", "Do not give food, drink, or unplanned medicine."],
+  "escalationRule": "Report any collapse, abnormal breathing, weakness, or change in speech to 112 immediately.",
+  "source": "Prototype placeholder; clinical governance review required.",
+  "translationKeys": { "title": "protocol.chestPain.title", "call": "protocol.common.call112" }
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": { "value": "dev" },
+    "location": { "value": "centralindia" },
+    "namePrefix": { "value": "goldenhour" },
+    "containerImage": { "value": "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest" },
+    "postgresAdministratorLogin": { "value": "goldenhouradmin" },
+    "postgresAdministratorPassword": { "value": "SUPPLY_SECURELY_AT_DEPLOYMENT" },
+    "jwtSigningKey": { "value": "SUPPLY_SECURELY_AT_DEPLOYMENT" },
+    "webhookSigningSecret": { "value": "SUPPLY_SECURELY_AT_DEPLOYMENT" },
+    "openAiApiKey": { "value": "" },
+    "demoPassword": { "value": "" },
+    "useMockProviders": { "value": true },
+    "openAiModel": { "value": "gpt-4.1-mini" },
+    "emergencyNumber": { "value": "112" },
+    "minReplicas": { "value": 1 },
+    "maxReplicas": { "value": 2 },
+    "tags": {
+      "value": {
+        "owner": "replace-with-team-or-owner",
+        "costCenter": "replace-with-cost-center"
+      }
+    }
+  }
+}

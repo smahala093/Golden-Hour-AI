@@ -1,0 +1,137 @@
+name: Android signed AAB
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: Semantic user-visible version, for example 0.1.0
+        required: true
+        type: string
+      version_code:
+        description: New monotonically increasing Play version code
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release
+  cancel-in-progress: false
+
+jobs:
+  signed-aab:
+    name: Build and verify signed AAB
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: android-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+
+      - name: Validate protected signing inputs
+        shell: pwsh
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          VERSION_NAME: ${{ inputs.version_name }}
+          VERSION_CODE: ${{ inputs.version_code }}
+        run: |
+          foreach ($name in @('ANDROID_KEYSTORE_BASE64', 'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Required Android signing secret '$name' is not configured."
+            }
+          }
+          if ($env:VERSION_NAME -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$') {
+            throw 'version_name must be a semantic version such as 0.1.0.'
+          }
+          if ([int64] $env:VERSION_CODE -lt 1) {
+            throw 'version_code must be a positive, monotonically increasing integer.'
+          }
+
+      - name: Test and build PWA
+        run: |
+          npm ci --prefix apps/web
+          npm run lint --prefix apps/web
+          npm run typecheck --prefix apps/web
+          npm test --prefix apps/web -- --run
+          npm run build --prefix apps/web
+
+      - name: Generate or synchronize Capacitor Android project
+        working-directory: apps/web
+        run: |
+          if [ -d android ]; then
+            npx cap sync android
+          else
+            npx cap add android
+          fi
+
+      - name: Apply permissions and release version
+        shell: pwsh
+        env:
+          VERSION_NAME: ${{ inputs.version_name }}
+          VERSION_CODE: ${{ inputs.version_code }}
+        run: |
+          ./android/patch-manifest.ps1 -ManifestPath apps/web/android/app/src/main/AndroidManifest.xml
+          ./android/set-version.ps1 -BuildGradlePath apps/web/android/app/build.gradle -VersionName $env:VERSION_NAME -VersionCode ([int] $env:VERSION_CODE)
+
+      - name: Configure ephemeral release signing
+        shell: pwsh
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          $keystorePath = Join-Path $env:RUNNER_TEMP 'golden-hour-upload.jks'
+          [IO.File]::WriteAllBytes($keystorePath, [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
+          Copy-Item android/signing.gradle apps/web/android/signing.gradle
+          $properties = @(
+            "storeFile=$($keystorePath.Replace('\', '/'))",
+            "storePassword=$env:ANDROID_KEYSTORE_PASSWORD",
+            "keyAlias=$env:ANDROID_KEY_ALIAS",
+            "keyPassword=$env:ANDROID_KEY_PASSWORD"
+          ) -join "`n"
+          [IO.File]::WriteAllText('apps/web/android/key.properties', $properties, (New-Object Text.UTF8Encoding($false)))
+          $buildGradle = 'apps/web/android/app/build.gradle'
+          $content = Get-Content $buildGradle -Raw
+          if ($content -notmatch "apply from: rootProject\.file\('signing\.gradle'\)") {
+            [IO.File]::AppendAllText($buildGradle, "`napply from: rootProject.file('signing.gradle')`n", (New-Object Text.UTF8Encoding($false)))
+          }
+
+      - name: Build signed release bundle
+        run: |
+          chmod +x apps/web/android/gradlew
+          ./apps/web/android/gradlew -p apps/web/android bundleRelease --no-daemon
+
+      - name: Verify archive signature and digest
+        run: |
+          jarsigner -verify apps/web/android/app/build/outputs/bundle/release/*.aab
+          sha256sum apps/web/android/app/build/outputs/bundle/release/*.aab
+
+      - name: Upload signed AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-hour-signed-aab-v${{ inputs.version_name }}-${{ inputs.version_code }}
+          path: apps/web/android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove ephemeral signing material
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'golden-hour-upload.jks') -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath apps/web/android/key.properties -Force -ErrorAction SilentlyContinue

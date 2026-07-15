@@ -1,0 +1,13 @@
+{
+  "id": "unconscious-not-breathing",
+  "version": "1.0.0",
+  "reviewStatus": "prototype-demonstration-clinical-review-required",
+  "country": "IN",
+  "notice": "Demonstration guidance requiring clinical review before production use.",
+  "emergencyCallInstruction": "Call 112 now. Put the phone on speaker and follow the emergency operator's instructions.",
+  "doActions": ["Check for normal breathing.", "If the person is not breathing normally, follow the operator's CPR instructions.", "Use an AED only if one is available and you can follow its prompts."],
+  "doNotActions": ["Do not delay the emergency call.", "Do not give food, drink, or medicine."],
+  "escalationRule": "Keep 112 connected and report any change immediately.",
+  "source": "Prototype placeholder; clinical governance review required.",
+  "translationKeys": { "title": "protocol.unconsciousNotBreathing.title", "call": "protocol.common.call112" }
+}

@@ -1,0 +1,13 @@
+{
+  "id": "heavy-external-bleeding",
+  "version": "1.0.0",
+  "reviewStatus": "prototype-demonstration-clinical-review-required",
+  "country": "IN",
+  "notice": "Demonstration guidance requiring clinical review before production use.",
+  "emergencyCallInstruction": "Call 112 now and report heavy bleeding.",
+  "doActions": ["Use a clean cloth to apply firm, continuous pressure to the wound.", "Keep pressure in place while waiting for help.", "Follow the emergency operator's instructions."],
+  "doNotActions": ["Do not remove an object embedded in the wound.", "Do not give food, drink, or medicine."],
+  "escalationRule": "Tell the 112 operator if bleeding continues or the person becomes less responsive.",
+  "source": "Prototype placeholder; clinical governance review required.",
+  "translationKeys": { "title": "protocol.heavyBleeding.title", "call": "protocol.common.call112" }
+}

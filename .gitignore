@@ -1,0 +1,62 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.secrets.json
+appsettings.*.local.json
+
+# .NET
+**/bin/
+**/obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+.dotnet-home/
+TestResults/
+coverage.cobertura.xml
+
+# Node / Vite / tests
+**/node_modules/
+.npm-cache/
+**/dist/
+**/coverage/
+**/.vite/
+**/.cache/
+playwright-report/
+test-results/
+blob-report/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+cookies.txt
+*.cookiejar
+
+# Capacitor / Android generated and local-only files
+**/android/.gradle/
+**/android/build/
+**/android/app/build/
+**/android/local.properties
+**/android/key.properties
+*.jks
+*.keystore
+*.aab
+*.apk
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.tmp
+
+# Infrastructure outputs
+infrastructure/.artifacts/
+infrastructure/bicep/main.json
+*.bicepparam.local
+what-if.json

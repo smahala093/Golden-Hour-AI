@@ -1,0 +1,13 @@
+{
+  "id": "unknown-emergency",
+  "version": "1.0.0",
+  "reviewStatus": "prototype-demonstration-clinical-review-required",
+  "country": "IN",
+  "notice": "Demonstration guidance requiring clinical review before production use.",
+  "emergencyCallInstruction": "Call 112 now if you believe there is an emergency or you are unsure.",
+  "doActions": ["Stay with the person if it is safe.", "Observe breathing and responsiveness.", "Follow the emergency operator's instructions."],
+  "doNotActions": ["Do not delay the emergency call while waiting for this app.", "Do not give food, drink, or unplanned medicine."],
+  "escalationRule": "Tell 112 about any change in breathing, consciousness, bleeding, or safety.",
+  "source": "Prototype placeholder; clinical governance review required.",
+  "translationKeys": { "title": "protocol.unknown.title", "call": "protocol.common.call112" }
+}

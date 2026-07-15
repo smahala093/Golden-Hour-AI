@@ -1,0 +1,121 @@
+name: Deploy Azure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub environment and Azure stage
+        required: true
+        type: choice
+        options: [dev, test, staging, prod]
+        default: dev
+      resource_group:
+        description: Existing or new Azure resource group name
+        required: true
+        type: string
+      location:
+        description: Azure region supporting all selected services
+        required: true
+        type: string
+        default: centralindia
+      name_prefix:
+        description: Lowercase product resource prefix
+        required: true
+        type: string
+        default: goldenhour
+      use_mock_providers:
+        description: Use deterministic providers (recommended for demo)
+        required: true
+        type: boolean
+        default: true
+      skip_migration:
+        description: Skip migration only for an explicitly schema-compatible release
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: azure-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: Required build and test gates
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Bicep, image, migration, health, smoke
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Azure using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy immutable release
+        shell: pwsh
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          POSTGRES_ADMIN_PASSWORD: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+          JWT_SIGNING_KEY: ${{ secrets.JWT_SIGNING_KEY }}
+          WEBHOOK_SIGNING_SECRET: ${{ secrets.WEBHOOK_SIGNING_SECRET }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEMO_PASSWORD: ${{ secrets.DEMO_PASSWORD }}
+          DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
+          RESOURCE_GROUP: ${{ inputs.resource_group }}
+          LOCATION: ${{ inputs.location }}
+          NAME_PREFIX: ${{ inputs.name_prefix }}
+          USE_MOCK_PROVIDERS: ${{ inputs.use_mock_providers }}
+          SKIP_MIGRATION: ${{ inputs.skip_migration }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          $required = @('AZURE_SUBSCRIPTION_ID', 'POSTGRES_ADMIN_PASSWORD', 'JWT_SIGNING_KEY', 'WEBHOOK_SIGNING_SECRET')
+          foreach ($name in $required) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Required deployment secret '$name' is not configured in the selected GitHub environment."
+            }
+          }
+
+          function To-Secure([string] $value) {
+            if ([string]::IsNullOrEmpty($value)) { return $null }
+            return ConvertTo-SecureString $value -AsPlainText -Force
+          }
+
+          $parameters = @{
+            SubscriptionId = $env:AZURE_SUBSCRIPTION_ID
+            ResourceGroup = $env:RESOURCE_GROUP
+            Location = $env:LOCATION
+            EnvironmentName = $env:DEPLOY_ENVIRONMENT
+            NamePrefix = $env:NAME_PREFIX
+            PostgresAdminPassword = To-Secure $env:POSTGRES_ADMIN_PASSWORD
+            JwtSigningKey = To-Secure $env:JWT_SIGNING_KEY
+            WebhookSigningSecret = To-Secure $env:WEBHOOK_SIGNING_SECRET
+            UseMockProviders = [Convert]::ToBoolean($env:USE_MOCK_PROVIDERS)
+            ImageTag = $env:IMAGE_TAG
+          }
+          if (-not [string]::IsNullOrEmpty($env:OPENAI_API_KEY)) {
+            $parameters.OpenAiApiKey = To-Secure $env:OPENAI_API_KEY
+          }
+          if ($env:DEPLOY_ENVIRONMENT -ne 'prod' -and -not [string]::IsNullOrEmpty($env:DEMO_PASSWORD)) {
+            $parameters.DemoPassword = To-Secure $env:DEMO_PASSWORD
+          }
+          if ([Convert]::ToBoolean($env:SKIP_MIGRATION)) {
+            $parameters.SkipMigration = $true
+          }
+
+          ./infrastructure/scripts/deploy.ps1 @parameters
+
+      - name: Azure logout
+        if: always()
+        run: az logout

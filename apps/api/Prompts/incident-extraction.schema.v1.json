@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "properties": {
+    "detectedLanguage": { "type": "string" },
+    "languageConfidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "incidentCategory": { "type": "string", "enum": ["chest_pain", "breathing_difficulty", "fall_or_injury", "unconscious", "seizure", "heavy_bleeding", "road_accident", "allergic_reaction", "child_emergency", "other", "unknown"] },
+    "patientRelationship": { "type": "string", "enum": ["self", "family", "bystander", "unknown"] },
+    "observations": { "type": "array", "items": { "type": "string" } },
+    "reportedSymptomStartTime": { "type": ["string", "null"] },
+    "isConscious": { "type": "string", "enum": ["yes", "no", "unknown"] },
+    "isBreathingNormally": { "type": "string", "enum": ["yes", "no", "unknown"] },
+    "isHeavyBleedingReported": { "type": "string", "enum": ["yes", "no", "unknown"] },
+    "locationDescription": { "type": ["string", "null"] },
+    "urgencyClassification": { "type": "string", "enum": ["emergency", "urgent", "unknown"] },
+    "criticalMissingQuestions": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "question": { "type": "string" },
+          "answerType": { "type": "string", "enum": ["yes_no", "single_choice", "time", "text"] }
+        },
+        "required": ["id", "question", "answerType"],
+        "additionalProperties": false
+      }
+    },
+    "handoverFacts": { "type": "array", "items": { "type": "string" } },
+    "uncertainties": { "type": "array", "items": { "type": "string" } },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+  },
+  "required": ["detectedLanguage", "languageConfidence", "incidentCategory", "patientRelationship", "observations", "reportedSymptomStartTime", "isConscious", "isBreathingNormally", "isHeavyBleedingReported", "locationDescription", "urgencyClassification", "criticalMissingQuestions", "handoverFacts", "uncertainties", "confidence"],
+  "additionalProperties": false
+}

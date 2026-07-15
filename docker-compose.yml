@@ -1,0 +1,65 @@
+name: golden-hour-ai
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-goldenhour}
+      POSTGRES_USER: ${POSTGRES_USER:-goldenhour}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-only-change-me}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      Database__UseInMemory: ${DATABASE_USE_IN_MEMORY:-false}
+      Database__MigrateOnStartup: ${DATABASE_MIGRATE_ON_STARTUP:-true}
+      ConnectionStrings__GoldenHour: Host=postgres;Port=5432;Database=${POSTGRES_DB:-goldenhour};Username=${POSTGRES_USER:-goldenhour};Password=${POSTGRES_PASSWORD:-local-only-change-me}
+      Authentication__Jwt__SigningKey: ${JWT_SIGNING_KEY:-development-only-signing-key-change-before-sharing-123456789}
+      Authentication__Jwt__Issuer: ${JWT_ISSUER:-GoldenHourAI}
+      Authentication__Jwt__Audience: ${JWT_AUDIENCE:-GoldenHourAI.Web}
+      Authentication__AccessTokenMinutes: ${ACCESS_TOKEN_MINUTES:-10}
+      Authentication__RefreshTokenDays: ${REFRESH_TOKEN_DAYS:-7}
+      Seed__DemoPassword: ${DEMO_PASSWORD:-GoldenHour-Demo-Only-2026!}
+      Webhook__SigningSecret: ${WEBHOOK_SIGNING_SECRET:-development-only-webhook-secret}
+      Webhook__AllowedClockSkewMinutes: ${WEBHOOK_ALLOWED_CLOCK_SKEW_MINUTES:-5}
+      Providers__UseMocks: ${USE_MOCK_PROVIDERS:-true}
+      OpenAI__ApiKey: ${OPENAI_API_KEY:-}
+      OpenAI__Model: ${OPENAI_MODEL:-gpt-4.1-mini}
+      OpenAI__BaseUrl: ${OPENAI_BASE_URL:-https://api.openai.com/v1/}
+      OpenAI__TimeoutSeconds: ${OPENAI_TIMEOUT_SECONDS:-15}
+      PublicAppUrl: ${PUBLIC_APP_URL:-http://localhost:8080}
+      Emergency__DefaultNumber: ${EMERGENCY_NUMBER:-112}
+      Emergency__AiConfidenceThreshold: ${AI_CONFIDENCE_THRESHOLD:-0.7}
+      Azure__Storage__ConnectionString: ${AZURE_STORAGE_CONNECTION_STRING:-}
+      Azure__SignalR__ConnectionString: ${AZURE_SIGNALR_CONNECTION_STRING:-}
+      Azure__ServiceBus__ConnectionString: ${AZURE_SERVICE_BUS_CONNECTION_STRING:-}
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING:-}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  postgres-data:

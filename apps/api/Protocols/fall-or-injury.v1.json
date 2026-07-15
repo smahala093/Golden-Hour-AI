@@ -1,0 +1,13 @@
+{
+  "id": "fall-or-injury",
+  "version": "1.0.0",
+  "reviewStatus": "prototype-demonstration-clinical-review-required",
+  "country": "IN",
+  "notice": "Demonstration guidance requiring clinical review before production use.",
+  "emergencyCallInstruction": "Call 112 for serious injury, heavy bleeding, loss of consciousness, abnormal breathing, or severe pain.",
+  "doActions": ["Keep the person still and comfortable.", "Watch breathing and responsiveness.", "Follow the emergency operator's instructions."],
+  "doNotActions": ["Do not move the person unless there is immediate danger.", "Do not give food, drink, or medicine."],
+  "escalationRule": "Report reduced responsiveness, abnormal breathing, or new heavy bleeding to 112 immediately.",
+  "source": "Prototype placeholder; clinical governance review required.",
+  "translationKeys": { "title": "protocol.fallInjury.title", "call": "protocol.common.call112" }
+}

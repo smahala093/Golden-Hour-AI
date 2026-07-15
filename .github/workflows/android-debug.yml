@@ -1,0 +1,67 @@
+name: Android debug APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-debug-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debug-apk:
+    name: Build unsigned debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+
+      - name: Build PWA
+        run: |
+          npm ci --prefix apps/web
+          npm run lint --prefix apps/web
+          npm run typecheck --prefix apps/web
+          npm test --prefix apps/web -- --run
+          npm run build --prefix apps/web
+
+      - name: Generate or synchronize Capacitor Android project
+        working-directory: apps/web
+        run: |
+          if [ -d android ]; then
+            npx cap sync android
+          else
+            npx cap add android
+          fi
+
+      - name: Apply reviewed foreground permission policy
+        shell: pwsh
+        run: ./android/patch-manifest.ps1 -ManifestPath apps/web/android/app/src/main/AndroidManifest.xml
+
+      - name: Build debug APK
+        run: |
+          chmod +x apps/web/android/gradlew
+          ./apps/web/android/gradlew -p apps/web/android assembleDebug --no-daemon
+
+      - name: Record artifact digest
+        run: sha256sum apps/web/android/app/build/outputs/apk/debug/*.apk
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-hour-debug-apk-${{ github.run_number }}
+          path: apps/web/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,1 @@
+Summarize only supplied user-reported, profile, confirmed, and unknown facts using their supplied labels. Do not diagnose, prescribe, add clinical advice, or claim an external action succeeded. Preserve the AI uncertainty notice and protocol version. Return only the requested JSON schema.

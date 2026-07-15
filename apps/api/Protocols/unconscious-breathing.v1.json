@@ -1,0 +1,13 @@
+{
+  "id": "unconscious-breathing",
+  "version": "1.0.0",
+  "reviewStatus": "prototype-demonstration-clinical-review-required",
+  "country": "IN",
+  "notice": "Demonstration guidance requiring clinical review before production use.",
+  "emergencyCallInstruction": "Call 112 now. Put the phone on speaker and follow the emergency operator's instructions.",
+  "doActions": ["Watch the person's breathing continuously.", "Keep the airway clear and follow the operator's positioning instructions.", "Report any change in breathing."],
+  "doNotActions": ["Do not leave the person alone.", "Do not give food, drink, or medicine."],
+  "escalationRule": "If breathing becomes abnormal, tell the 112 operator immediately.",
+  "source": "Prototype placeholder; clinical governance review required.",
+  "translationKeys": { "title": "protocol.unconsciousBreathing.title", "call": "protocol.common.call112" }
+}

@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,9 +25,15 @@ export async function installReviewedProtocolRoute(page: Page): Promise<void> {
 }
 
 export async function answerCriticalQuestions(page: Page): Promise<void> {
-  while (/\/emergency\/questions$/.test(new URL(page.url()).pathname)) {
-    await page.getByRole('button', { name: 'Not sure' }).click();
-    const next = page.getByRole('button', { name: /Next question|Show next action/ });
+  while (/\/emergency\/[^/]+\/questions$/.test(new URL(page.url()).pathname)) {
+    const questionCard = page.locator('.question-card');
+    const notSure = questionCard.getByRole('button', { name: 'Not sure' });
+    await expect(async () => {
+      if (await notSure.getAttribute('aria-pressed') !== 'true') await notSure.click();
+      await expect(notSure).toHaveAttribute('aria-pressed', 'true');
+    }).toPass({ timeout: 10_000 });
+    const next = questionCard.getByRole('button', { name: /Next question|Show next action/ });
+    await expect(next).toBeEnabled();
     await next.click();
     await page.waitForTimeout(50);
   }

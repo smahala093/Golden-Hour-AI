@@ -32,7 +32,12 @@ public sealed record IncidentExtraction(
     IReadOnlyList<string> Uncertainties,
     decimal Confidence);
 
-public sealed record IncidentInterpretation(IncidentExtraction Extraction, bool IsUncertain, bool UsedStaticFallback, string? FailureCode);
+public sealed record IncidentInterpretation(
+    IncidentExtraction Extraction,
+    bool IsUncertain,
+    bool UsedStaticFallback,
+    string? FailureCode,
+    AiCallMetadata? AiMetadata = null);
 
 public sealed class SnakeCaseEnumJsonConverter<TEnum> : JsonConverter<TEnum> where TEnum : struct, Enum
 {
@@ -67,30 +72,44 @@ public sealed partial class IncidentExtractionValidator : AbstractValidator<Inci
 {
     public IncidentExtractionValidator()
     {
-        RuleFor(x => x.DetectedLanguage).NotEmpty().MaximumLength(35);
+        RuleFor(x => x.DetectedLanguage).NotEmpty().MinimumLength(2).MaximumLength(35).Must(BeControlFree);
         RuleFor(x => x.LanguageConfidence).InclusiveBetween(0, 1);
         RuleFor(x => x.Confidence).InclusiveBetween(0, 1);
-        RuleFor(x => x.Observations).NotNull().Must(x => x.Count <= 20).WithMessage("No more than 20 observations are allowed.");
-        RuleForEach(x => x.Observations).NotEmpty().MaximumLength(500);
-        RuleFor(x => x.CriticalMissingQuestions).NotNull().Must(x => x.Count <= 3).WithMessage("No more than three immediate questions are allowed.");
+        RuleFor(x => x.Observations).NotNull().Must(x => x is null || x.Count <= 12).WithMessage("No more than 12 observations are allowed.");
+        RuleForEach(x => x.Observations).NotEmpty().MaximumLength(240).Must(BeControlFree);
+        RuleFor(x => x.ReportedSymptomStartTime).Must(value => value is null || IsBoundedNonBlankControlFree(value, 100))
+            .WithMessage("Reported symptom start time must be null or 1 to 100 control-free characters.");
+        RuleFor(x => x.LocationDescription).Must(value => value is null || IsBoundedNonBlankControlFree(value, 300))
+            .WithMessage("Location description must be null or 1 to 300 control-free characters.");
+        RuleFor(x => x.CriticalMissingQuestions).NotNull().Must(x => x is null || x.Count <= 3).WithMessage("No more than three immediate questions are allowed.");
+        RuleFor(x => x.CriticalMissingQuestions).Must(HaveUniqueQuestionIds)
+            .WithMessage("Critical question IDs must be unique.");
         RuleForEach(x => x.CriticalMissingQuestions).ChildRules(question =>
         {
             question.RuleFor(x => x.Id).NotEmpty().MaximumLength(80).Matches("^[a-z0-9-]+$");
-            question.RuleFor(x => x.Question).NotEmpty().MaximumLength(300);
+            question.RuleFor(x => x.Question).NotEmpty().MaximumLength(240).Must(BeControlFree);
+            question.RuleFor(x => x).Must(IsSupportedQuestion)
+                .WithMessage("Critical question ID, answer type, and text must match the server-owned reviewed question allowlist.");
         });
-        RuleFor(x => x.HandoverFacts).NotNull().Must(x => x.Count <= 30);
-        RuleForEach(x => x.HandoverFacts).NotEmpty().MaximumLength(500);
-        RuleFor(x => x.Uncertainties).NotNull().Must(x => x.Count <= 20);
-        RuleForEach(x => x.Uncertainties).NotEmpty().MaximumLength(500);
+        RuleFor(x => x.HandoverFacts).NotNull().Must(x => x is null || x.Count <= 16);
+        RuleForEach(x => x.HandoverFacts).NotEmpty().MaximumLength(240).Must(BeControlFree);
+        RuleFor(x => x.Uncertainties).NotNull().Must(x => x is null || x.Count <= 8);
+        RuleForEach(x => x.Uncertainties).NotEmpty().MaximumLength(240).Must(BeControlFree);
         RuleFor(x => x).Custom(ValidateForbiddenContent);
     }
 
     private static void ValidateForbiddenContent(IncidentExtraction extraction, ValidationContext<IncidentExtraction> context)
     {
-        var text = string.Join('\n', extraction.Observations
-            .Concat(extraction.HandoverFacts)
-            .Concat(extraction.Uncertainties)
-            .Concat(extraction.CriticalMissingQuestions.Select(x => x.Question)));
+        var text = string.Join('\n', new[]
+            {
+                extraction.DetectedLanguage,
+                extraction.ReportedSymptomStartTime,
+                extraction.LocationDescription
+            }.Where(x => x is not null).Cast<string>()
+            .Concat(extraction.Observations ?? [])
+            .Concat(extraction.HandoverFacts ?? [])
+            .Concat(extraction.Uncertainties ?? [])
+            .Concat((extraction.CriticalMissingQuestions ?? []).Where(x => x is not null).Select(x => x.Question)));
 
         if (DiagnosisPattern().IsMatch(text))
         {
@@ -112,6 +131,25 @@ public sealed partial class IncidentExtractionValidator : AbstractValidator<Inci
             context.AddFailure("AI output contains treatment or action instructions instead of reported facts.");
         }
     }
+
+    private static bool IsSupportedQuestion(CriticalMissingQuestion question) => question.Id switch
+    {
+        "conscious" => question.AnswerType == CriticalAnswerType.YesNo && question.Question == "Is the person conscious?",
+        "breathing" or "breathing-normally" => question.AnswerType == CriticalAnswerType.YesNo && question.Question == "Is the person breathing normally?",
+        "heavy-bleeding" => question.AnswerType == CriticalAnswerType.YesNo && question.Question == "Is heavy bleeding visible?",
+        "confirm-facts" => question.AnswerType == CriticalAnswerType.YesNo && question.Question == "Do the extracted facts match what you reported?",
+        "symptom-start-time" => question.AnswerType is CriticalAnswerType.Time or CriticalAnswerType.Text
+            && question.Question == "When did the reported symptoms start?",
+        _ => false
+    };
+
+    private static bool HaveUniqueQuestionIds(IReadOnlyList<CriticalMissingQuestion>? questions) =>
+        questions is null || questions.Where(x => x is not null).Select(x => x.Id).Distinct(StringComparer.Ordinal).Count() == questions.Count;
+
+    private static bool BeControlFree(string? value) => value is not null && value.All(character => !char.IsControl(character));
+
+    private static bool IsBoundedNonBlankControlFree(string value, int maximumLength) =>
+        value.Length is > 0 && value.Length <= maximumLength && !string.IsNullOrWhiteSpace(value) && BeControlFree(value);
 
     [GeneratedRegex(@"\b(diagnos(?:is|ed|e)|you have|patient has|confirmed (?:heart attack|stroke|anaphylaxis)|(?:likely|possible|possibly|suspected)\s+(?:an?\s+)?(?:heart attack|stroke|anaphylaxis))\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex DiagnosisPattern();
@@ -147,22 +185,38 @@ public sealed class IncidentUnderstandingService(
 
         try
         {
-            var extraction = await aiProvider.ExtractIncidentAsync(originalText, selectedLanguage, cancellationToken);
+            var providerResult = await aiProvider.ExtractIncidentAsync(originalText, selectedLanguage, cancellationToken);
+            var extraction = providerResult.Value;
             var validation = await validator.ValidateAsync(extraction, cancellationToken);
             if (!validation.IsValid)
             {
                 logger.LogWarning("AI incident extraction failed contract validation with {FailureCount} failures.", validation.Errors.Count);
-                return Fallback(originalText, selectedLanguage, fallbackCategory, relationship, "invalid_ai_output");
+                return Fallback(originalText, selectedLanguage, fallbackCategory, relationship, "invalid_ai_output", providerResult.Metadata);
             }
 
             var uncertain = extraction.Confidence < emergencyOptions.Value.AiConfidenceThreshold
                 || extraction.LanguageConfidence < emergencyOptions.Value.AiConfidenceThreshold;
-            return new IncidentInterpretation(extraction, uncertain, false, null);
+            if (uncertain && extraction.CriticalMissingQuestions.Count == 0)
+            {
+                extraction = extraction with
+                {
+                    CriticalMissingQuestions = [new CriticalMissingQuestion(
+                        "confirm-facts",
+                        "Do the extracted facts match what you reported?",
+                        CriticalAnswerType.YesNo)]
+                };
+            }
+            return new IncidentInterpretation(extraction, uncertain, false, null, providerResult.Metadata);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             logger.LogWarning("AI incident extraction timed out.");
             return Fallback(originalText, selectedLanguage, fallbackCategory, relationship, "ai_timeout");
+        }
+        catch (AiProviderException exception)
+        {
+            logger.LogWarning("AI incident extraction was unavailable with safe code {FailureCode}; using static fallback.", exception.Code);
+            return Fallback(originalText, selectedLanguage, fallbackCategory, relationship, MapSafeFailureCode(exception.Code), exception.Metadata);
         }
         catch (Exception exception) when (exception is not ValidationException and not OperationCanceledException)
         {
@@ -176,7 +230,8 @@ public sealed class IncidentUnderstandingService(
         string? selectedLanguage,
         IncidentCategory fallbackCategory,
         PatientRelationship relationship,
-        string failureCode)
+        string failureCode,
+        AiCallMetadata? metadata = null)
     {
         var extraction = new IncidentExtraction(
             selectedLanguage ?? "und",
@@ -190,12 +245,26 @@ public sealed class IncidentUnderstandingService(
             TernaryAnswer.Unknown,
             null,
             UrgencyClassification.Unknown,
-            [new CriticalMissingQuestion("confirm-facts", "Please confirm the reported facts.", CriticalAnswerType.Text)],
-            [originalText],
+            [
+                new CriticalMissingQuestion("conscious", "Is the person conscious?", CriticalAnswerType.YesNo),
+                new CriticalMissingQuestion("breathing", "Is the person breathing normally?", CriticalAnswerType.YesNo),
+                new CriticalMissingQuestion("heavy-bleeding", "Is heavy bleeding visible?", CriticalAnswerType.YesNo)
+            ],
+            ["AI was unavailable; use the preserved original description and confirmed answers."],
             ["AI interpretation is unavailable or uncertain."],
             0);
-        return new IncidentInterpretation(extraction, true, true, failureCode);
+        return new IncidentInterpretation(extraction, true, true, failureCode, metadata);
     }
+
+    private static string MapSafeFailureCode(string providerCode) => providerCode switch
+    {
+        "refusal" => "ai_refusal",
+        "rate_limited" => "ai_rate_limited",
+        "incomplete_output" => "ai_incomplete_output",
+        "malformed_output" or "empty_output" => "ai_malformed_output",
+        "timeout" => "ai_timeout",
+        _ => "ai_unavailable"
+    };
 }
 
 public static class DemoIncident
@@ -205,7 +274,7 @@ public static class DemoIncident
 
 public sealed class MockAiProvider : IAiProvider
 {
-    public Task<IncidentExtraction> ExtractIncidentAsync(string originalText, string? selectedLanguage, CancellationToken cancellationToken)
+    public Task<AiProviderResult<IncidentExtraction>> ExtractIncidentAsync(string originalText, string? selectedLanguage, CancellationToken cancellationToken)
     {
         var looksHindi = originalText.Any(character => character is >= '\u0900' and <= '\u097F');
         var chestPain = originalText.Contains("chest", StringComparison.OrdinalIgnoreCase)
@@ -235,17 +304,21 @@ public sealed class MockAiProvider : IAiProvider
                 : ["Emergency details need confirmation."],
             ["Extracted facts remain user-reported and unconfirmed."],
             chestPain ? 0.93m : 0.55m);
-        return Task.FromResult(extraction);
+        return Task.FromResult(new AiProviderResult<IncidentExtraction>(
+            extraction,
+            new AiCallMetadata("incident_extraction", "deterministic-mock", "deterministic-mock-v1", 0, null, null)));
     }
 
     public Task<string> TranslateApprovedTextAsync(string text, string targetLanguage, CancellationToken cancellationToken) => Task.FromResult(text);
 
-    public Task<IReadOnlyList<string>> SuggestCoordinationTaskCodesAsync(IncidentExtraction incident, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<string>>(["call-emergency-services", "stay-with-patient", "bring-medical-records", "not-allowlisted"]);
+    public Task<AiProviderResult<IReadOnlyList<string>>> SuggestCoordinationTaskCodesAsync(IncidentExtraction incident, CancellationToken cancellationToken) =>
+        Task.FromResult(new AiProviderResult<IReadOnlyList<string>>(
+            ["call-emergency-services", "stay-with-patient", "bring-medical-records", "not-allowlisted"],
+            new AiCallMetadata("coordination_task_suggestion", "deterministic-mock", "deterministic-mock-v1", 0, null, null)));
 }
 
 public sealed class MockSpeechToTextProvider : ISpeechToTextProvider
 {
     public Task<SpeechTranscription> TranscribeAsync(Stream audio, string contentType, string? languageHint, CancellationToken cancellationToken) =>
-        Task.FromResult(new SpeechTranscription(DemoIncident.HindiChestPain, "hi", 0.98m));
+        Task.FromResult(new SpeechTranscription(DemoIncident.HindiChestPain, "hi", 0.98m, 8m));
 }

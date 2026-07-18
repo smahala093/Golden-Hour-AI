@@ -41,6 +41,10 @@ param webhookSigningSecret string
 param openAiApiKey string = ''
 
 @secure()
+@description('SMS gateway HMAC signing secret. Required only when deterministic provider mocks are disabled.')
+param smsGatewaySigningSecret string = ''
+
+@secure()
 @description('Optional development-only seeded account password. It is ignored in Production and prod deployments.')
 param demoPassword string = ''
 
@@ -49,6 +53,9 @@ param useMockProviders bool = true
 
 @description('Backend OpenAI model configuration.')
 param openAiModel string = 'gpt-4.1-mini'
+
+@description('HTTPS SMS gateway message endpoint. Required only when deterministic provider mocks are disabled.')
+param smsGatewayEndpoint string = ''
 
 @description('Default country-specific emergency call number.')
 param emergencyNumber string = '112'
@@ -87,6 +94,7 @@ var serviceBusName = take('${stem}-sb', 50)
 var signalRName = take('${stem}-signalr', 63)
 var databaseName = 'goldenhour'
 var shouldConfigureOpenAi = !empty(openAiApiKey) && !useMockProviders
+var shouldConfigureSmsGateway = !useMockProviders
 var shouldSeedDemo = environmentName != 'prod' && !empty(demoPassword)
 var acrPullRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
 var keyVaultSecretsUserRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
@@ -490,6 +498,14 @@ resource openAiSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (shoul
   }
 }
 
+resource smsGatewaySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (shouldConfigureSmsGateway) {
+  parent: keyVault
+  name: 'sms-gateway-signing-secret'
+  properties: {
+    value: smsGatewaySigningSecret
+  }
+}
+
 resource demoPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (shouldSeedDemo) {
   parent: keyVault
   name: 'demo-password'
@@ -565,6 +581,13 @@ var optionalOpenAiContainerSecrets = shouldConfigureOpenAi ? [
     identity: appIdentity.id
   }
 ] : []
+var optionalSmsGatewayContainerSecrets = shouldConfigureSmsGateway ? [
+  {
+    name: 'sms-gateway-signing-secret'
+    keyVaultUrl: smsGatewaySecret.properties.secretUriWithVersion
+    identity: appIdentity.id
+  }
+] : []
 var optionalDemoContainerSecrets = shouldSeedDemo ? [
   {
     name: 'demo-password'
@@ -572,7 +595,7 @@ var optionalDemoContainerSecrets = shouldSeedDemo ? [
     identity: appIdentity.id
   }
 ] : []
-var containerSecrets = concat(baseContainerSecrets, optionalOpenAiContainerSecrets, optionalDemoContainerSecrets)
+var containerSecrets = concat(baseContainerSecrets, optionalOpenAiContainerSecrets, optionalSmsGatewayContainerSecrets, optionalDemoContainerSecrets)
 
 var baseEnvironmentVariables = [
   {
@@ -590,6 +613,14 @@ var baseEnvironmentVariables = [
   {
     name: 'Database__MigrateOnStartup'
     value: 'false'
+  }
+  {
+    name: 'Security__UseForwardedHeaders'
+    value: 'true'
+  }
+  {
+    name: 'Security__KnownNetworks__0'
+    value: '10.42.0.0/16'
   }
   {
     name: 'ConnectionStrings__GoldenHour'
@@ -658,13 +689,35 @@ var optionalOpenAiEnvironmentVariables = shouldConfigureOpenAi ? [
     secretRef: 'openai-api-key'
   }
 ] : []
+var optionalSmsGatewayEnvironmentVariables = shouldConfigureSmsGateway ? [
+  {
+    name: 'SmsGateway__Enabled'
+    value: 'true'
+  }
+  {
+    name: 'SmsGateway__Endpoint'
+    value: smsGatewayEndpoint
+  }
+  {
+    name: 'SmsGateway__SigningSecret'
+    secretRef: 'sms-gateway-signing-secret'
+  }
+  {
+    name: 'SmsGateway__TimeoutSeconds'
+    value: '10'
+  }
+  {
+    name: 'SmsGateway__MaximumResponseBytes'
+    value: '65536'
+  }
+] : []
 var optionalDemoEnvironmentVariables = shouldSeedDemo ? [
   {
     name: 'Seed__DemoPassword'
     secretRef: 'demo-password'
   }
 ] : []
-var environmentVariables = concat(baseEnvironmentVariables, optionalOpenAiEnvironmentVariables, optionalDemoEnvironmentVariables)
+var environmentVariables = concat(baseEnvironmentVariables, optionalOpenAiEnvironmentVariables, optionalSmsGatewayEnvironmentVariables, optionalDemoEnvironmentVariables)
 
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName

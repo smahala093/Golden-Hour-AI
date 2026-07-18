@@ -2,14 +2,14 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
-import { AlertTriangle, ArrowLeft, Check, HeartPulse, LocateFixed, Mic, MicOff, Phone, Square } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Check, HeartPulse, Languages, LocateFixed, Mic, MicOff, Phone, Square, Volume2 } from 'lucide-react';
 import { z } from 'zod';
 import { api } from '../api';
 import { emergencyNumber, PageHeading } from '../components/AppShell';
 import { hindiDemoInput } from '../demoData';
+import { supportedLanguages } from '../i18n';
 import { useAppState } from '../state';
-import { incidentCategories, type EmergencyProtocol, type IncidentCategory, type PatientRelationship, type TriState } from '../types';
-import { getProtocolTranslation } from '../protocolTranslations';
+import { incidentCategories, type EmergencyProtocol, type IncidentCategory, type IncidentExtraction, type PatientRelationship, type TriState } from '../types';
 
 const categoryTranslationKeys: Record<IncidentCategory, string> = {
   'chest-pain': 'category.chestPain',
@@ -35,10 +35,11 @@ export function StartEmergencyPage() {
   const navigate = useNavigate();
   const { draft, updateDraft, setSession } = useAppState();
   const mutation = useMutation({
-    mutationFn: () => api.createSession(draft.category, draft.relationship),
+    mutationFn: () => api.createSession(draft.category, draft.relationship, draft.relationship === 'family' && draft.useOwnerProfileForPatient),
     onSuccess: (session) => {
       setSession(session);
-      void navigate('/emergency/capture');
+      updateDraft({ input: '', location: '', answers: {}, useOwnerProfileForPatient: false });
+      void navigate(`/emergency/${session.id}/capture`);
     },
   });
 
@@ -49,9 +50,10 @@ export function StartEmergencyPage() {
         <fieldset className="fieldset">
           <legend className="sr-only">{t('start.title')}</legend>
           <div className="choice-grid">
-            {relationshipChoices.map((choice) => <label className="choice-card" key={choice.value}><input type="radio" name="relationship" value={choice.value} checked={draft.relationship === choice.value} onChange={() => updateDraft({ relationship: choice.value })} /><HeartPulse aria-hidden="true" /><span>{t(choice.key)}</span></label>)}
+            {relationshipChoices.map((choice) => <label className="choice-card" key={choice.value}><input type="radio" name="relationship" value={choice.value} checked={draft.relationship === choice.value} onChange={() => updateDraft({ relationship: choice.value, useOwnerProfileForPatient: choice.value === 'family' ? draft.useOwnerProfileForPatient : false })} /><HeartPulse aria-hidden="true" /><span>{t(choice.key)}</span></label>)}
           </div>
         </fieldset>
+        {draft.relationship === 'family' && <label className="toggle-row"><span><strong>{t('start.useOwnerProfile')}</strong><small>{t('start.useOwnerProfileHint')}</small></span><span className="switch"><input type="checkbox" checked={draft.useOwnerProfileForPatient} onChange={(event) => updateDraft({ useOwnerProfileForPatient: event.target.checked })} /><span aria-hidden="true" /></span></label>}
         <section className="section" aria-labelledby="category-heading">
           <h2 id="category-heading">{t('start.category')}</h2>
           <p className="field-hint">{t('start.categoryHint')}</p>
@@ -78,6 +80,11 @@ export function IncidentCapturePage() {
   const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
   const [microphoneDenied, setMicrophoneDenied] = useState(false);
   const [locationDenied, setLocationDenied] = useState(false);
+  const [latitude, setLatitude] = useState('');
+  const [longitude, setLongitude] = useState('');
+  const [locationConsent, setLocationConsent] = useState(false);
+  const [selectedCoordinates, setSelectedCoordinates] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [locationNotice, setLocationNotice] = useState('');
   const [error, setError] = useState('');
   const [skipPending, setSkipPending] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -130,15 +137,53 @@ export function IncidentCapturePage() {
   };
 
   const useLocation = () => {
+    setLocationNotice('');
     if (!navigator.geolocation) {
       setLocationDenied(true);
       return;
     }
     navigator.geolocation.getCurrentPosition(
-      ({ coords }) => updateDraft({ location: `${coords.latitude.toFixed(5)}, ${coords.longitude.toFixed(5)}` }),
-      () => setLocationDenied(true),
+      ({ coords }) => {
+        const coordinates = { latitude: coords.latitude, longitude: coords.longitude };
+        setSelectedCoordinates(coordinates);
+        setLocationDenied(false);
+        setLocationConsent(true);
+        setLocationNotice(t('capture.locationReady', { latitude: coords.latitude.toFixed(5), longitude: coords.longitude.toFixed(5) }));
+      },
+      () => {
+        setSelectedCoordinates(null);
+        setLocationConsent(false);
+        setLocationDenied(true);
+      },
       { timeout: 8_000, maximumAge: 60_000, enableHighAccuracy: false },
     );
+  };
+
+  const useManualMapPin = () => {
+    const parsedLatitude = Number(latitude);
+    const parsedLongitude = Number(longitude);
+    if (!locationConsent) {
+      setSelectedCoordinates(null);
+      setLocationNotice(t('capture.pinConsentRequired'));
+      return;
+    }
+    if (!Number.isFinite(parsedLatitude) || parsedLatitude < -90 || parsedLatitude > 90 || !Number.isFinite(parsedLongitude) || parsedLongitude < -180 || parsedLongitude > 180) {
+      setSelectedCoordinates(null);
+      setLocationNotice(t('capture.pinInvalid'));
+      return;
+    }
+    setSelectedCoordinates({ latitude: parsedLatitude, longitude: parsedLongitude });
+    setLocationNotice(t('capture.pinReady'));
+  };
+
+  const saveSelectedLocation = async (updated: typeof session) => {
+    if (!selectedCoordinates) return updated;
+    try {
+      return await api.updateLocationCoordinates(updated.id, selectedCoordinates.latitude, selectedCoordinates.longitude, draft.location);
+    } catch {
+      setLocationNotice(t('capture.locationSaveFailed'));
+      return updated;
+    }
   };
 
   const submit = async (event: FormEvent) => {
@@ -151,10 +196,11 @@ export function IncidentCapturePage() {
     try {
       let updated = recordedBlob
         ? await api.uploadVoice(session.id, recordedBlob)
-        : await api.submitIncident(session.id, draft.input.trim(), draft.location.trim());
-      if (recordedBlob && draft.location.trim()) updated = await api.updateLocation(session.id, draft.location.trim());
+        : await api.submitIncident(session.id, draft.input.trim(), selectedCoordinates ? '' : draft.location.trim(), false, session.category);
+      if (selectedCoordinates) updated = await saveSelectedLocation(updated);
+      else if (recordedBlob && draft.location.trim()) updated = await api.updateLocation(session.id, draft.location.trim());
       setSession(updated);
-      void navigate(updated.extraction.criticalMissingQuestions.length > 0 ? '/emergency/questions' : '/emergency/action');
+      void navigate(updated.extraction.criticalMissingQuestions.length > 0 ? `/emergency/${updated.id}/questions` : `/emergency/${updated.id}/action`);
     } catch {
       setError(t('errors.genericBody'));
     }
@@ -164,9 +210,10 @@ export function IncidentCapturePage() {
     if (!draft.input.trim()) { setError(t('auth.invalid')); return; }
     setSkipPending(true); setError('');
     try {
-      const updated = await api.submitIncident(session.id, draft.input.trim(), draft.location.trim(), true);
+      let updated = await api.submitIncident(session.id, draft.input.trim(), selectedCoordinates ? '' : draft.location.trim(), true, session.category);
+      updated = await saveSelectedLocation(updated);
       setSession(updated);
-      void navigate('/emergency/action');
+      void navigate(`/emergency/${updated.id}/questions`);
     } catch { setError(t('errors.genericBody')); }
     finally { setSkipPending(false); }
   };
@@ -186,6 +233,8 @@ export function IncidentCapturePage() {
           <button className="button button--secondary" type="button" onClick={useLocation}><LocateFixed aria-hidden="true" />{t('capture.useLocation')}</button>
           <div className="field"><label htmlFor="manual-location">{t('capture.manualLocation')}</label><input id="manual-location" value={draft.location} onChange={(event) => updateDraft({ location: event.target.value })} maxLength={300} autoComplete="street-address" /></div>
           {locationDenied && <p className="permission-note" role="status">{t('capture.locationDenied')}</p>}
+          {locationDenied && <fieldset className="fieldset"><legend>{t('capture.manualPin')}</legend><p className="field-hint">{t('capture.manualPinHint')}</p><div className="form-grid"><div className="field"><label htmlFor="manual-latitude">{t('capture.latitude')}</label><input id="manual-latitude" type="number" inputMode="decimal" min="-90" max="90" step="0.00001" value={latitude} onChange={(event) => { setLatitude(event.target.value); setSelectedCoordinates(null); }} /></div><div className="field"><label htmlFor="manual-longitude">{t('capture.longitude')}</label><input id="manual-longitude" type="number" inputMode="decimal" min="-180" max="180" step="0.00001" value={longitude} onChange={(event) => { setLongitude(event.target.value); setSelectedCoordinates(null); }} /></div></div><label className="choice-card"><input type="checkbox" checked={locationConsent} onChange={(event) => { setLocationConsent(event.target.checked); setSelectedCoordinates(null); }} /><Check aria-hidden="true" /><span>{t('capture.pinConsent')}</span></label><button className="button button--secondary" type="button" onClick={useManualMapPin}>{t('capture.usePin')}</button></fieldset>}
+          <p role="status" aria-live="polite">{locationNotice}</p>
         </div>
         {error && <p className="field-error" role="alert">{error}</p>}
         <div className="button-row"><button className="button" type="submit">{t('capture.submit')}</button><button className="button button--secondary" type="button" disabled={skipPending} onClick={() => void skipAi()}>{skipPending ? t('common.loading') : t('capture.skipAi')}</button></div>
@@ -197,17 +246,20 @@ export function IncidentCapturePage() {
 export function CriticalQuestionsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { session, draft, answerQuestion, setSession } = useAppState();
-  const questions = session.extraction.criticalMissingQuestions.slice(0, 3);
+  const { session, draft, answerQuestion, setSession, preferences, updatePreferences } = useAppState();
+  const questions = useMemo(() => questionsForConfirmation(session.extraction, session.interpretationUncertain), [session.extraction, session.interpretationUncertain]);
   const [index, setIndex] = useState(0);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
+  const [needsRevision, setNeedsRevision] = useState(false);
   const question = questions[index];
+  const interpretedFacts = useMemo(() => [...new Set([...session.extraction.observations, ...session.extraction.handoverFacts])].slice(0, 10), [session.extraction.handoverFacts, session.extraction.observations]);
 
   useEffect(() => {
-    if (!question) void navigate('/emergency/action', { replace: true });
-  }, [navigate, question]);
+    if (!question && !needsRevision) void navigate(`/emergency/${session.id}/action`, { replace: true });
+  }, [navigate, needsRevision, question, session.id]);
 
+  if (needsRevision) return <section className="centered-state" role="alert"><AlertTriangle aria-hidden="true" size={44} /><h1>{t('questions.reviseTitle')}</h1><p>{t('questions.reviseBody')}</p><Link className="button" to={`/emergency/${session.id}/capture`}>{t('questions.editReport')}</Link></section>;
   if (!question) return null;
   const answer = draft.answers[question.id];
 
@@ -221,8 +273,14 @@ export function CriticalQuestionsPage() {
     setError('');
     try {
       const updated = await api.answerQuestions(session.id, draft.answers);
-      setSession({ ...updated, extraction: { ...updated.extraction, isBreathingNormally: draft.answers.breathing ?? updated.extraction.isBreathingNormally, isConscious: draft.answers.conscious ?? updated.extraction.isConscious } });
-      void navigate('/emergency/action');
+      const breathing = draft.answers.breathing;
+      const conscious = draft.answers.conscious;
+      setSession({ ...updated, extraction: { ...updated.extraction, isBreathingNormally: breathing === 'yes' || breathing === 'no' || breathing === 'unknown' ? breathing : updated.extraction.isBreathingNormally, isConscious: conscious === 'yes' || conscious === 'no' || conscious === 'unknown' ? conscious : updated.extraction.isConscious } });
+      if (draft.answers['confirm-facts'] === 'no') {
+        setNeedsRevision(true);
+        return;
+      }
+      void navigate(`/emergency/${updated.id}/action`);
     } catch {
       setError(t('errors.genericBody'));
     } finally {
@@ -231,20 +289,31 @@ export function CriticalQuestionsPage() {
   };
 
   const answers: { value: TriState; label: string }[] = [{ value: 'yes', label: t('common.yes') }, { value: 'no', label: t('common.no') }, { value: 'unknown', label: t('common.unknown') }];
+  const triStateQuestion = question.answerType === 'yes_no' || question.answerType === 'single_choice';
   return (
     <div>
       <PageHeading title={t('questions.title')} description={t('questions.subtitle')} />
+      <section className="card section" aria-labelledby="report-review-heading"><h2 id="report-review-heading">{t('questions.reportReview')}</h2><h3>{t('questions.originalReport')}</h3><p className="transcript">{session.originalInput || t('common.unknown')}</p><h3>{t('questions.interpretedFacts')}</h3>{interpretedFacts.length > 0 ? <ul className="plain-list">{interpretedFacts.map((fact) => <li key={fact}>{fact}</li>)}</ul> : <p>{t('questions.noExtractedFacts')}</p>}</section>
+      {session.extraction.languageConfidence < 0.7 && <div className="permission-note" role="status"><Languages aria-hidden="true" /><div className="field"><label htmlFor="confirmation-language">{t('questions.languageConfirm')}</label><select id="confirmation-language" value={preferences.language} onChange={(event) => updatePreferences({ language: event.target.value })}>{supportedLanguages.map((language) => <option key={language.code} value={language.code}>{language.label}</option>)}</select><p className="field-hint">{t('questions.languageLabelsOnly')}</p></div></div>}
       <div className="progress-steps" aria-hidden="true">{questions.map((item, itemIndex) => <span key={item.id} className={`progress-step ${itemIndex <= index ? 'progress-step--complete' : ''}`} />)}</div>
       <section className="card card--raised question-card" aria-labelledby="question-text">
         <p className="eyebrow">{t('questions.count', { current: index + 1, total: questions.length })}</p>
-        <h2 id="question-text" className="question-text">{question.id === 'conscious' ? t('questions.conscious') : question.id === 'breathing' ? t('questions.breathing') : question.id === 'bleeding' ? t('questions.bleeding') : question.question}</h2>
-        {!['conscious', 'breathing', 'bleeding'].includes(question.id) && <p className="field-hint">{t('questions.fallback')}</p>}
-        <div className="answer-grid">{answers.map((option) => <button key={option.value} className="answer-button" type="button" aria-pressed={answer === option.value} onClick={() => answerQuestion(question.id, option.value)}>{option.label}</button>)}</div>
+        <h2 id="question-text" className="question-text">{question.id === 'conscious' ? t('questions.conscious') : question.id === 'breathing' || question.id === 'breathing-normally' ? t('questions.breathing') : question.id === 'heavy-bleeding' ? t('questions.bleeding') : question.id === 'confirm-facts' ? t('questions.confirmFacts') : question.question}</h2>
+        {!['conscious', 'breathing', 'breathing-normally', 'heavy-bleeding', 'confirm-facts'].includes(question.id) && <p className="field-hint">{t('questions.fallback')}</p>}
+        {triStateQuestion ? <div className="answer-grid">{answers.map((option) => <button key={option.value} className="answer-button" type="button" aria-pressed={answer === option.value} onClick={() => answerQuestion(question.id, option.value)}>{option.label}</button>)}</div> : <div className="field"><label htmlFor={`answer-${question.id}`}>{question.question}</label><input id={`answer-${question.id}`} type={question.answerType === 'time' ? 'datetime-local' : 'text'} value={answer ?? ''} maxLength={100} onChange={(event) => answerQuestion(question.id, event.target.value)} /></div>}
         {error && <p className="field-error" role="alert">{error}</p>}
         <button className="button" type="button" disabled={!answer || pending} onClick={() => void next()}>{pending ? t('common.loading') : index < questions.length - 1 ? t('questions.next') : t('questions.finish')}</button>
       </section>
     </div>
   );
+}
+
+const allowedCriticalQuestionIds = new Set(['conscious', 'breathing', 'breathing-normally', 'heavy-bleeding', 'symptom-start-time', 'confirm-facts']);
+
+export function questionsForConfirmation(extraction: IncidentExtraction, interpretationUncertain: boolean): IncidentExtraction['criticalMissingQuestions'] {
+  const serverQuestions = extraction.criticalMissingQuestions.filter((question) => allowedCriticalQuestionIds.has(question.id)).slice(0, 3);
+  if (!interpretationUncertain || serverQuestions.some((question) => question.id === 'confirm-facts')) return serverQuestions;
+  return [...serverQuestions.slice(0, 2), { id: 'confirm-facts', question: 'Does this interpretation match what you reported?', answerType: 'yes_no' }];
 }
 
 const protocolItemSchema = z.object({
@@ -253,37 +322,61 @@ const protocolItemSchema = z.object({
   }).passthrough();
 const protocolSchema = z.union([z.array(protocolItemSchema), z.object({ protocols: z.array(protocolItemSchema) }).passthrough()]);
 
-function protocolId(category: IncidentCategory, breathing: TriState = 'unknown'): string {
-  const ids: Record<IncidentCategory, string> = { 'chest-pain': 'chest-pain', 'breathing-difficulty': 'unknown-emergency', 'fall-injury': 'fall-or-injury', unconscious: breathing === 'no' ? 'unconscious-not-breathing' : 'unconscious-breathing', seizure: 'seizure', 'heavy-bleeding': 'heavy-external-bleeding', 'road-accident': 'unknown-emergency', 'allergic-reaction': 'suspected-allergic-reaction', 'child-emergency': 'unknown-emergency', unknown: 'unknown-emergency' };
+export function protocolId(category: IncidentCategory, breathing: TriState = 'unknown'): string {
+  const unconsciousProtocol = breathing === 'no' ? 'unconscious-not-breathing' : breathing === 'yes' ? 'unconscious-breathing' : 'unknown-emergency';
+  const ids: Record<IncidentCategory, string> = { 'chest-pain': 'chest-pain', 'breathing-difficulty': 'unknown-emergency', 'fall-injury': 'fall-or-injury', unconscious: unconsciousProtocol, seizure: 'seizure', 'heavy-bleeding': 'heavy-external-bleeding', 'road-accident': 'fall-or-injury', 'allergic-reaction': 'suspected-allergic-reaction', 'child-emergency': 'unknown-emergency', unknown: 'unknown-emergency' };
   return ids[category];
 }
 
-export async function loadCachedProtocol(category: IncidentCategory, language: string, breathing: TriState = 'unknown'): Promise<EmergencyProtocol> {
+export async function loadCachedProtocol(category: IncidentCategory, breathing: TriState = 'unknown'): Promise<EmergencyProtocol> {
   const response = await fetch('/api/v1/protocols?country=IN', { credentials: 'omit' });
   if (!response.ok) throw new Error('Protocol catalogue unavailable');
   const parsed = protocolSchema.parse(await response.json());
   const protocols = Array.isArray(parsed) ? parsed : parsed.protocols;
   const raw = protocols.find((protocol) => protocol.id === protocolId(category, breathing)) ?? protocols.find((protocol) => protocol.id === 'unknown-emergency');
   if (!raw) throw new Error('Fallback protocol missing');
-  const translation = getProtocolTranslation(language, raw.id);
-  const actionText = translation?.actions ?? raw.doActions;
-  return { id: raw.id, title: raw.id.replaceAll('-', ' '), version: raw.version, reviewStatus: raw.reviewStatus, country: raw.country, emergencyCallInstruction: translation?.call ?? raw.emergencyCallInstruction, doActions: actionText.map((title, index) => ({ id: `action-${index + 1}`, title, detail: '' })), doNotActions: translation?.doNot ?? raw.doNotActions, escalationRule: translation?.escalation ?? raw.escalationRule, source: raw.source, disclaimer: raw.notice };
+  return { id: raw.id, title: raw.id.replaceAll('-', ' '), version: raw.version, reviewStatus: raw.reviewStatus, country: raw.country, emergencyCallInstruction: raw.emergencyCallInstruction, doActions: raw.doActions.map((title, index) => ({ id: `action-${index + 1}`, title, detail: '' })), doNotActions: raw.doNotActions, escalationRule: raw.escalationRule, source: raw.source, disclaimer: raw.notice };
 }
 
 export function EmergencyActionPage() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
-  const { session, setSession } = useAppState();
+  const { session, setSession, profile } = useAppState();
   const [step, setStep] = useState(0);
   const [callAttempted, setCallAttempted] = useState(false);
   const [callSaving, setCallSaving] = useState(false);
   const [callError, setCallError] = useState('');
+  const [audioUrl, setAudioUrl] = useState('');
+  const [audioPending, setAudioPending] = useState(false);
+  const [audioNotice, setAudioNotice] = useState('');
+  const audioUrlRef = useRef('');
   const number = session.emergencyNumber || emergencyNumber();
   const language = (i18n.resolvedLanguage ?? i18n.language).split('-')[0] ?? 'en';
-  const protocolQuery = useQuery({ queryKey: ['protocol', session.category, language, session.extraction.isBreathingNormally], queryFn: () => loadCachedProtocol(session.category, language, session.extraction.isBreathingNormally), staleTime: Infinity, retry: 1 });
-  const protocol = protocolQuery.data ?? session.protocol;
+  const protocolQuery = useQuery({ queryKey: ['protocol', session.category, session.extraction.isBreathingNormally], queryFn: () => loadCachedProtocol(session.category, session.extraction.isBreathingNormally), enabled: !session.protocol, staleTime: Infinity, retry: 1 });
+  const protocol = session.protocol ?? protocolQuery.data;
   const actions = useMemo(() => protocol ? [{ id: 'emergency-call', title: protocol.emergencyCallInstruction, detail: t('action.noClaim') }, ...protocol.doActions] : [], [protocol, t]);
   const current = actions[step];
+
+  useEffect(() => () => {
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+  }, []);
+
+  const readApprovedGuidance = async () => {
+    setAudioPending(true);
+    setAudioNotice('');
+    try {
+      const audio = await api.getProtocolAudio(session.id);
+      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+      const url = URL.createObjectURL(audio);
+      audioUrlRef.current = url;
+      setAudioUrl(url);
+      setAudioNotice(t('action.audioReady'));
+    } catch {
+      setAudioNotice(t('action.audioUnavailable'));
+    } finally {
+      setAudioPending(false);
+    }
+  };
 
   const confirmConnected = async () => {
     setCallSaving(true);
@@ -311,6 +404,7 @@ export function EmergencyActionPage() {
         <p className="eyebrow">{t('action.step', { current: step + 1, total: actions.length })}</p>
         <h2>{current.title}</h2>
         {current.detail && <p>{current.detail}</p>}
+        {profile.responseMode !== 'text' && <div className="stack--tight"><button className="button button--secondary" type="button" disabled={audioPending} onClick={() => void readApprovedGuidance()}><Volume2 aria-hidden="true" />{audioPending ? t('common.loading') : t('action.readAloud')}</button>{audioUrl && <audio controls autoPlay src={audioUrl}>{t('action.audioReady')}</audio>}<p role="status" aria-live="polite">{audioNotice}</p></div>}
         {step === 0 ? <><a className="button button--danger" href={`tel:${number}`} onClick={() => { setCallAttempted(true); void api.addTimeline(session.id, 'call-initiated', 'Emergency dial action initiated by the user; connection is not confirmed.').catch(() => undefined); }}><Phone aria-hidden="true" />{t('common.call', { number })}</a>{callAttempted && <button className="button button--secondary" type="button" disabled={callSaving} onClick={() => void confirmConnected()}><Check aria-hidden="true" />{t('action.callConnected')}</button>}{callError && <p className="field-error" role="alert">{callError}</p>}</> : null}
         {step < actions.length - 1 ? <button className="button" type="button" onClick={() => setStep((currentStep) => currentStep + 1)}>{t('action.next')}</button> : <button className="button" type="button" onClick={() => { void navigate(`/emergency/${session.id}`); }}>{t('action.coordinate')}</button>}
       </section>
@@ -320,7 +414,7 @@ export function EmergencyActionPage() {
       </div>
       <aside className="disclaimer">{protocol.disclaimer}</aside>
       <section className="card section"><h2>{t('action.doNot')}</h2><ul className="plain-list">{protocol.doNotActions.map((action) => <li key={action}>{action}</li>)}</ul><h2>{t('action.escalation')}</h2><p>{protocol.escalationRule}</p></section>
-      {!['en', 'hi'].includes(language) && <p className="permission-note" role="status">{t('action.translationFallback')}</p>}
+      {language !== 'en' && <p className="permission-note" role="status">{t('action.translationFallback')}</p>}
     </div>
   );
 }

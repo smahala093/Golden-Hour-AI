@@ -7,6 +7,7 @@ import { ApiError, MOCK_MODE, api } from '../api';
 import { emergencyNumber, PageHeading } from '../components/AppShell';
 import { loadCachedProtocol } from './EmergencyFlowPages';
 import { useAppState } from '../state';
+import { safeParticipantInviteDestination } from '../participantInvite';
 import { incidentCategories, type EmergencySession, type IncidentCategory } from '../types';
 
 const publicCategoryKeys: Record<IncidentCategory, string> = { 'chest-pain': 'category.chestPain', 'breathing-difficulty': 'category.breathingDifficulty', 'fall-injury': 'category.fallInjury', unconscious: 'category.unconscious', seizure: 'category.seizure', 'heavy-bleeding': 'category.heavyBleeding', 'road-accident': 'category.roadAccident', 'allergic-reaction': 'category.allergicReaction', 'child-emergency': 'category.childEmergency', unknown: 'category.unknown' };
@@ -58,7 +59,7 @@ export function AnonymousEmergencyPage() {
   const [error, setError] = useState('');
   const [pending, setPending] = useState(false);
   const language = (i18n.resolvedLanguage ?? 'en').split('-')[0] ?? 'en';
-  const protocolQuery = useQuery({ queryKey: ['public-protocol', session?.category, language], queryFn: () => loadCachedProtocol(session?.category ?? category, language), enabled: Boolean(session), staleTime: Infinity });
+  const protocolQuery = useQuery({ queryKey: ['public-protocol', session?.category], queryFn: () => loadCachedProtocol(session?.category ?? category), enabled: Boolean(session) && !session?.protocol, staleTime: Infinity });
   const number = emergencyNumber();
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -72,26 +73,20 @@ export function AnonymousEmergencyPage() {
     finally { setPending(false); }
   };
   if (session) {
-    const protocol = protocolQuery.data ?? session.protocol;
-    return <div><PageHeading eyebrow={t('bystander.limited')} title={t('action.title')} description={t('bystander.privateToken')} /><a className="button button--danger button--full" href={`tel:${session.emergencyNumber || number}`}><Phone aria-hidden="true" />{t('common.call', { number: session.emergencyNumber || number })}</a>{protocol && <section className="card card--raised section"><h2>{protocol.emergencyCallInstruction}</h2><ol className="plain-list">{protocol.doActions.map((action) => <li key={action.id}><strong>{action.title}</strong><p>{action.detail}</p></li>)}</ol><h3>{t('action.doNot')}</h3><ul className="plain-list">{protocol.doNotActions.map((action) => <li key={action}>{action}</li>)}</ul><h3>{t('action.escalation')}</h3><p>{protocol.escalationRule}</p><p className="disclaimer">{protocol.disclaimer}</p></section>}</div>;
+    const protocol = session.protocol ?? protocolQuery.data;
+    return <div><PageHeading eyebrow={t('bystander.limited')} title={t('action.title')} description={t('bystander.privateToken')} /><a className="button button--danger button--full" href={`tel:${session.emergencyNumber || number}`}><Phone aria-hidden="true" />{t('common.call', { number: session.emergencyNumber || number })}</a>{language !== 'en' && <p className="permission-note" role="status">{t('action.translationFallback')}</p>}{protocol && <section className="card card--raised section"><h2>{protocol.emergencyCallInstruction}</h2><ol className="plain-list">{protocol.doActions.map((action) => <li key={action.id}><strong>{action.title}</strong><p>{action.detail}</p></li>)}</ol><h3>{t('action.doNot')}</h3><ul className="plain-list">{protocol.doNotActions.map((action) => <li key={action}>{action}</li>)}</ul><h3>{t('action.escalation')}</h3><p>{protocol.escalationRule}</p><p className="disclaimer">{protocol.disclaimer}</p></section>}</div>;
   }
   return <div><PageHeading title={t('landing.nearby')} description={t('bystander.anonymousIntro')} /><form className="form-grid" onSubmit={(event) => void submit(event)}><fieldset className="fieldset"><legend>{t('start.category')}</legend><div className="category-grid">{incidentCategories.map((item) => <label className="choice-card" key={item}><input type="radio" name="public-category" checked={category === item} onChange={() => setCategory(item)} /><span>{t(publicCategoryKeys[item])}</span></label>)}</div></fieldset><div className="field"><label htmlFor="public-description">{t('capture.typed')}</label><textarea id="public-description" value={description} onChange={(event) => setDescription(event.target.value)} maxLength={12_000} required /></div><div className="field"><label htmlFor="public-location">{t('capture.manualLocation')}</label><input id="public-location" value={location} onChange={(event) => setLocation(event.target.value)} maxLength={300} /></div>{error && <p className="field-error" role="alert">{error}</p>}<button className="button" type="submit" disabled={pending}>{pending ? t('common.loading') : t('bystander.submit')}</button></form></div>;
 }
 
 interface AuthPageProps { mode: 'login' | 'register' }
 
-function safeInviteDestination(state: unknown): string | null {
-  if (!state || typeof state !== 'object' || !('from' in state)) return null;
-  const requested = (state as { from?: unknown }).from;
-  return typeof requested === 'string' && /^\/emergency\/[a-z0-9-]{1,80}\/join#[^#/?]{16,512}$/i.test(requested) ? requested : null;
-}
-
 export function AuthPage({ mode }: AuthPageProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
   const { setAuthenticated } = useAppState();
-  const inviteDestination = safeInviteDestination(location.state as unknown);
+  const inviteDestination = safeParticipantInviteDestination(location.state as unknown);
   const [error, setError] = useState('');
   const [pending, setPending] = useState(false);
 

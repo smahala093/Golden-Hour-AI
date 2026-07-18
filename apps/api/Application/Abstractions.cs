@@ -9,9 +9,28 @@ public interface IClock
 
 public interface IAiProvider
 {
-    Task<IncidentExtraction> ExtractIncidentAsync(string originalText, string? selectedLanguage, CancellationToken cancellationToken);
+    Task<AiProviderResult<IncidentExtraction>> ExtractIncidentAsync(string originalText, string? selectedLanguage, CancellationToken cancellationToken);
     Task<string> TranslateApprovedTextAsync(string text, string targetLanguage, CancellationToken cancellationToken);
-    Task<IReadOnlyList<string>> SuggestCoordinationTaskCodesAsync(IncidentExtraction incident, CancellationToken cancellationToken);
+    Task<AiProviderResult<IReadOnlyList<string>>> SuggestCoordinationTaskCodesAsync(IncidentExtraction incident, CancellationToken cancellationToken);
+}
+
+public sealed record AiCallMetadata(
+    string OperationType,
+    string Provider,
+    string Model,
+    long LatencyMilliseconds,
+    int? InputTokens,
+    int? OutputTokens);
+
+public sealed record AiProviderResult<T>(T Value, AiCallMetadata Metadata);
+
+public sealed class AiProviderException(
+    string code,
+    string message,
+    AiCallMetadata? metadata = null) : Exception(message)
+{
+    public string Code { get; } = code;
+    public AiCallMetadata? Metadata { get; } = metadata;
 }
 
 public interface ISpeechToTextProvider
@@ -48,7 +67,7 @@ public interface IFileStorage
     Task<Stream> OpenReadAsync(string storageKey, CancellationToken cancellationToken);
 }
 
-public sealed record SpeechTranscription(string OriginalTranscript, string DetectedLanguage, decimal LanguageConfidence);
+public sealed record SpeechTranscription(string OriginalTranscript, string DetectedLanguage, decimal LanguageConfidence, decimal? DurationSeconds);
 public sealed record ProviderDelivery(string ProviderMessageId, string Status, bool ProviderConfirmed);
 
 public sealed class SystemClock(TimeProvider timeProvider) : IClock
@@ -85,5 +104,5 @@ public sealed class UnavailableFileStorage : IFileStorage
 public sealed class MockTextToSpeechProvider : ITextToSpeechProvider
 {
     public Task<Stream> SynthesizeAsync(string approvedText, string language, CancellationToken cancellationToken) =>
-        Task.FromResult<Stream>(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(approvedText), writable: false));
+        throw new NotSupportedException("Read-aloud audio is unavailable in deterministic mock mode.");
 }

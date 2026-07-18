@@ -27,7 +27,7 @@ RUN dotnet ef migrations bundle \
     --force
 
 FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine AS runtime
-RUN apk add --no-cache curl
+RUN apk add --no-cache curl icu-libs
 WORKDIR /app
 COPY --from=api-build /out/api/ ./
 COPY --from=web-build /src/apps/web/dist/ ./wwwroot/

@@ -100,6 +100,7 @@ public sealed class DomainRulesTests
     [InlineData(TernaryAnswer.Yes, TernaryAnswer.Yes, TernaryAnswer.No, IncidentCategory.Seizure, "seizure")]
     [InlineData(TernaryAnswer.Yes, TernaryAnswer.Yes, TernaryAnswer.No, IncidentCategory.AllergicReaction, "suspected-allergic-reaction")]
     [InlineData(TernaryAnswer.Yes, TernaryAnswer.Yes, TernaryAnswer.No, IncidentCategory.ChestPain, "chest-pain")]
+    [InlineData(TernaryAnswer.Unknown, TernaryAnswer.Unknown, TernaryAnswer.Unknown, IncidentCategory.HeavyBleeding, "heavy-external-bleeding")]
     [InlineData(TernaryAnswer.Yes, TernaryAnswer.Yes, TernaryAnswer.No, IncidentCategory.RoadAccident, "fall-or-injury")]
     public void ProtocolSelection_UsesExplicitFactsAndReviewedFallbacks(
         TernaryAnswer conscious,

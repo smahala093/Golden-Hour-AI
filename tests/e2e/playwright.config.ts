@@ -6,6 +6,9 @@ const e2eDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(e2eDirectory, '..', '..');
 const mockBaseUrl = 'http://127.0.0.1:5173';
 const realBaseUrl = 'http://127.0.0.1:5174';
+const demoPassword = process.env.E2E_DEMO_PASSWORD
+  ?? process.env.Seed__DemoPassword
+  ?? 'GoldenHour-Demo-Only-2026!';
 
 export default defineConfig({
   testDir: './specs',
@@ -30,7 +33,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: 'npm run dev --prefix apps/web -- --host 127.0.0.1 --port 5173 --strictPort',
+      command: 'npm run dev --prefix apps/web -- --host 127.0.0.1 --port 5173 --strictPort --configLoader runner',
       cwd: repositoryRoot,
       env: { VITE_MOCK_MODE: 'true', VITE_EMERGENCY_NUMBER: '112' },
       url: mockBaseUrl,
@@ -38,21 +41,24 @@ export default defineConfig({
       timeout: 120_000,
     },
     {
-      command: 'dotnet run --project apps/api/GoldenHour.Api.csproj --no-launch-profile',
+      command: 'dotnet run --project apps/api/GoldenHour.Api.csproj --no-launch-profile --no-restore',
       cwd: repositoryRoot,
       env: {
         ASPNETCORE_ENVIRONMENT: 'Development',
         ASPNETCORE_URLS: 'http://127.0.0.1:8080',
         DOTNET_CLI_HOME: resolve(repositoryRoot, '.dotnet-home'),
+        APPDATA: resolve(repositoryRoot, '.dotnet-home'),
+        LOCALAPPDATA: resolve(repositoryRoot, '.dotnet-home'),
         Database__UseInMemory: 'true',
         Providers__UseMocks: 'true',
+        Seed__DemoPassword: demoPassword,
       },
       url: 'http://127.0.0.1:8080/health/live',
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
     },
     {
-      command: 'npm run dev --prefix apps/web -- --host 127.0.0.1 --port 5174 --strictPort',
+      command: 'npm run dev --prefix apps/web -- --host 127.0.0.1 --port 5174 --strictPort --configLoader runner',
       cwd: repositoryRoot,
       env: { VITE_MOCK_MODE: 'false', VITE_EMERGENCY_NUMBER: '112' },
       url: realBaseUrl,

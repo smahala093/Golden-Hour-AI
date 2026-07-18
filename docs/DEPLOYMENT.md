@@ -2,7 +2,7 @@
 
 ## Deployment contract
 
-The first Azure topology serves the built React PWA and ASP.NET Core API from one Azure Container App and one HTTPS origin. This simplifies Secure/HttpOnly browser cookies, SignalR, CSP, and routing. PostgreSQL is privately reachable from the Container Apps environment. External provider resources are provisioned but used only when the corresponding application adapter/configuration is enabled and healthy.
+The first Azure topology serves the built React PWA and ASP.NET Core API from one Azure Container App and one HTTPS origin. This simplifies Secure/HttpOnly browser cookies, SignalR, CSP, and routing. PostgreSQL is privately reachable from the Container Apps environment. OpenAI/speech and an outbound HTTPS/HMAC SMS gateway have configurable application adapters. Blob, Service Bus, Azure SignalR, map/file-storage/email/general-notification adapters, and an Application Insights exporter are not active even though Azure resources are provisioned.
 
 No Azure subscription, hosted URL, provider delivery, APK, or AAB is included or claimed by this repository.
 
@@ -11,10 +11,12 @@ flowchart TB
     User((Browser / PWA)) -->|HTTPS| App["Container App\nASP.NET + PWA"]
     App -->|private VNet + TLS| PG["PostgreSQL Flexible Server"]
     App --> KV["Key Vault secret references"]
-    App --> Blob["Private Blob container"]
-    App --> Bus["Service Bus outbox queue"]
-    App --> SignalR["Azure SignalR Service"]
-    App --> AI["Application Insights / Log Analytics"]
+    App -. "provisioned; adapter inactive" .-> Blob["Private Blob container"]
+    App -. "provisioned; adapter inactive" .-> Bus["Service Bus queue"]
+    App -. "provisioned; adapter inactive" .-> SignalR["Azure SignalR Service"]
+    App -. "provisioned; exporter inactive" .-> AI["Application Insights / Log Analytics"]
+    App -. "optional configured provider" .-> OpenAI["OpenAI APIs"]
+    App -. "optional HTTPS + HMAC" .-> SMS["SMS gateway"]
     ACR["Azure Container Registry"] -->|managed identity pull| App
     Job["Manual EF migration job"] -->|private VNet + TLS| PG
     ACR --> Job
@@ -41,6 +43,7 @@ flowchart TB
 | `infrastructure/scripts/rollback.ps1` | Preflight a prior revision, shift traffic, verify, and restore previous traffic if checks fail |
 | `.github/workflows/ci.yml` | Build/test/coverage/PWA/E2E/container/Bicep gates |
 | `.github/workflows/deploy-azure.yml` | Manual protected-environment OIDC deployment after reusable CI gates |
+| `.github/workflows/security-supply-chain.yml` | CodeQL, image SBOM, high/critical vulnerability gate, and manual-only attested/keyless-signed GHCR publication |
 
 ## Local container environment
 
@@ -54,7 +57,11 @@ docker compose up --build --detach --wait
 ./infrastructure/scripts/smoke-test.ps1 -BaseUrl http://localhost:8080
 ```
 
+If Windows blocks checked-in scripts through its machine execution policy, review the script first and run it in a one-process scope, for example `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infrastructure\scripts\smoke-test.ps1 -BaseUrl http://localhost:8080`. Do not change the machine-wide policy for this task.
+
 The Compose API overrides `Database__UseInMemory=false`, uses the PostgreSQL service, enables controlled startup migration for a single local application container, and uses deterministic mock providers. It binds the app to `http://localhost:8080`; do not expose this development configuration to a network.
+
+The current application always uses in-process SignalR, a null event bus, unavailable file storage, mock map/email/general-notification implementations, and no Application Insights/OpenTelemetry exporter. Mock mode also uses development-only mock SMS and does not send a message. Real-provider mode enables the configured HMAC SMS adapter together with OpenAI/speech; `accepted`/`queued` is not delivery confirmation, and no external delivery is claimed without a verified callback. Bicep provisioning and injected Azure connection strings do not activate the inactive cloud adapters. Implement, secure, health-check, and test each adapter before enabling more than one application replica or claiming provider delivery/telemetry.
 
 Inspect status without printing environment variables:
 
@@ -87,7 +94,7 @@ The final image includes:
 - `GoldenHour.Api.dll` and backend content.
 - `wwwroot/` from `apps/web/dist` for one-origin hosting.
 - `/app/efbundle`, generated from checked-in EF migrations for the same release.
-- Alpine ASP.NET runtime plus `curl` for container liveness.
+- Alpine ASP.NET runtime plus `curl` for container liveness and `icu-libs` for the application's multilingual/globalization support.
 
 The API runs as the .NET image's non-root `$APP_UID` on port `8080`. The Docker health check calls `/health/live`; orchestration readiness must call `/health/ready`. An image build fails if locked npm install, PWA build, .NET restore/publish, or migration-bundle generation fails.
 
@@ -98,7 +105,7 @@ The API runs as the .NET image's non-root `$APP_UID` on port `8080`. The Docker 
 3. Resource providers registered for `Microsoft.App`, `Microsoft.ContainerRegistry`, `Microsoft.DBforPostgreSQL`, `Microsoft.Insights`, `Microsoft.KeyVault`, `Microsoft.ManagedIdentity`, `Microsoft.Network`, `Microsoft.OperationalInsights`, `Microsoft.ServiceBus`, `Microsoft.SignalRService`, and `Microsoft.Storage`.
 4. A region with capacity for PostgreSQL Flexible Server, Container Apps VNet integration, SignalR, and chosen SKUs. The example uses `centralindia`; availability and quota must be verified in the owner's subscription.
 5. Budget/alerts and an owner/cost-center tag. The Bicep template creates billable resources; delete disposable resource groups after use.
-6. High-entropy, unique PostgreSQL/JWT/webhook values. OpenAI and demo passwords are optional. Do not reuse local/CI examples.
+6. High-entropy, unique PostgreSQL/JWT/webhook values. In real-provider mode, also supply an OpenAI key, an approved HTTPS SMS endpoint, and a 32-byte-or-longer SMS HMAC secret. Demo passwords are optional and non-production only. Do not reuse local/CI examples.
 
 `dev` uses economical prototype SKUs, including free SignalR where available. `prod` selects Standard SignalR and General Purpose PostgreSQL, but the checked-in application still uses its in-process SignalR hub and outbox dispatcher. The template therefore permits exactly one app replica until Azure SignalR delegation and a distributed outbox lease are implemented and verified. It also still needs an owner review for capacity, high availability, geo-backup, private endpoints/egress, WAF/front door, custom domain/certificate, retention, quotas, alerting, and disaster recovery. These are not silently assumed.
 
@@ -134,6 +141,19 @@ $webhook = Read-Host 'Webhook HMAC secret' -AsSecureString
 
 Review the what-if for replacements, public network changes, role assignments, secret updates, PostgreSQL changes, and cost. Then run the same command without `-WhatIfOnly`.
 
+The example above keeps deterministic mocks enabled. Real-provider mode is intentionally coupled: `-UseMockProviders $false` requires both `-OpenAiApiKey` and the following SMS settings, and must not be enabled until provider privacy/contracts/callbacks are approved:
+
+```powershell
+$openAi = Read-Host 'OpenAI API key' -AsSecureString
+$smsSecret = Read-Host 'SMS gateway HMAC secret (32+ UTF-8 bytes)' -AsSecureString
+
+# Add these parameters to the reviewed deploy.ps1 invocation:
+# -UseMockProviders $false
+# -OpenAiApiKey $openAi
+# -SmsGatewayEndpoint 'https://approved-sms-gateway.example/messages'
+# -SmsGatewaySigningSecret $smsSecret
+```
+
 The script:
 
 1. Registers providers unless `-SkipProviderRegistration` is explicitly supplied.
@@ -161,6 +181,7 @@ Required environment secrets:
 | `POSTGRES_ADMIN_PASSWORD` | Flexible Server administrator secret |
 | `JWT_SIGNING_KEY` | Application signing key, 32+ high-entropy characters |
 | `WEBHOOK_SIGNING_SECRET` | Provider webhook HMAC secret |
+| `SMS_GATEWAY_SIGNING_SECRET` | Required with real providers; outbound gateway HMAC secret of at least 32 UTF-8 bytes |
 
 Optional environment secrets:
 
@@ -169,9 +190,15 @@ Optional environment secrets:
 | `OPENAI_API_KEY` | Backend-only; required only when `use_mock_providers=false` |
 | `DEMO_PASSWORD` | Non-production only; Bicep and backend ignore demo seeding in `prod`/Production |
 
+Required GitHub environment variable when real providers are selected:
+
+| Variable | Constraint |
+| --- | --- |
+| `SMS_GATEWAY_ENDPOINT` | Absolute approved HTTPS message endpoint; never place credentials in the URL |
+
 Give the federated identity only the resource-group deployment and role-assignment permissions required by the template. A common prototype setup needs Contributor plus User Access Administrator scoped to the resource group; reduce this with a custom role and separate identity/RBAC bootstrap in a mature environment.
 
-Run **Actions → Deploy Azure → Run workflow**, select the protected environment, exact resource group/location/prefix, and mock-provider mode. The deployment job reuses all CI jobs before authenticating. A workflow run is successful only after migration, health, and smoke steps complete. Copy the actual URL from observed deployment output; do not add a placeholder/fabricated URL to documentation.
+Run **Actions → Deploy Azure → Run workflow**, select the protected environment, exact resource group/location/prefix, and mock-provider mode. The deployment job reuses all CI jobs before authenticating. Migration is an explicit, observed phase inside the deploy script; rollback is a separate operator action. The `skip_migration` workflow input defaults to `false` and may be enabled only after an explicit review confirms that the release is schema-compatible. A workflow run is successful only after the migration phase (unless that reviewed gate was explicitly skipped), health, and smoke steps complete. Copy the actual URL from observed deployment output; do not add a placeholder/fabricated URL to documentation.
 
 ## Database migrations
 
@@ -207,7 +234,7 @@ The job has one completion, bounded retry/time, and only the database secret it 
 - `/health/ready`: required server dependencies (especially the selected database) are ready. Response details remain non-sensitive.
 - `smoke-test.ps1`: asserts liveness/readiness, HTTP 200 shell with the product title, and standalone PWA manifest.
 
-These checks do not assert login, emergency safety, SignalR, OpenAI, speech, notifications, SMS/email, Service Bus delivery, Blob operations, ambulance/hospital contact, accessibility, or clinical correctness. Those need the automated/manual evidence in [TEST_PLAN.md](TEST_PLAN.md).
+These checks do not assert login, emergency safety, SignalR, OpenAI, speech, notification/SMS/email delivery, Service Bus delivery, Blob operations, ambulance/hospital contact, accessibility, or clinical correctness. Those need the automated/manual evidence in [TEST_PLAN.md](TEST_PLAN.md).
 
 ## Rollback
 
@@ -260,7 +287,7 @@ The template configures PostgreSQL backup retention (7 days non-production, 14 d
 - Logs/telemetry contain no emergency input, profile, location, contact, token, prompt/output, provider body, key, or connection string.
 - Resource authorization, share token, webhook replay, rate limit, concurrency/idempotency, accessibility, and negative tests pass against the deployed revision.
 - Alerts, budget, on-call/owner, retention, backup/restore, key rotation, rollback compatibility, and incident contacts are recorded.
-- Real adapters remain disabled until credentials, privacy terms, callback verification, failure behavior, health, and delivery reconciliation are tested.
+- OpenAI/speech and SMS remain in mock mode until credentials, privacy terms, callback verification, failure behavior, health, and delivery reconciliation are tested. Provisioned but inactive Azure/map/file/email/general-notification adapters must not be described as operational.
 
 Delete an entire disposable environment only after confirming it contains no needed data, logs, artifacts, keys, or recovery evidence:
 

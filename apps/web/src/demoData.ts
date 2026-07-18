@@ -25,6 +25,9 @@ export const demoProfile: EmergencyProfile = {
   ],
   shareFields: ['name', 'approximateAge', 'allergies', 'conditions', 'medicines', 'emergencyContact'],
   reviewedAt: '2026-07-05T09:30:00.000Z',
+  allergyStatusCompleted: true,
+  medicationStatusCompleted: true,
+  sharingReviewed: true,
   locationPermissionReviewed: true,
   qrGenerated: true,
 };
@@ -42,8 +45,8 @@ export const demoExtraction: IncidentExtraction = {
   locationDescription: 'Near Civil Lines, Jaipur (fictional demo location)',
   urgencyClassification: 'emergency',
   criticalMissingQuestions: [
-    { id: 'breathing', question: 'Is he breathing normally?', answerType: 'yes_no' },
-    { id: 'conscious', question: 'Is he awake and responding?', answerType: 'yes_no' },
+    { id: 'breathing', question: 'Is the person breathing normally?', answerType: 'yes_no' },
+    { id: 'conscious', question: 'Is the person conscious?', answerType: 'yes_no' },
   ],
   handoverFacts: ['Reported sudden chest pain', 'Heavy sweating reported', 'Speaking is difficult'],
   uncertainties: ['Breathing status has not yet been confirmed'],
@@ -62,6 +65,7 @@ export const demoSession: EmergencySession = {
   location: 'Near Civil Lines, Jaipur (fictional demo location)',
   originalInput: hindiDemoInput,
   normalizedInput: 'My father suddenly has chest pain, heavy sweating, and difficulty speaking.',
+  interpretationUncertain: true,
   extraction: demoExtraction,
   participants: ['Asha · with patient', 'Vikram · connected remotely'],
   participantDetails: [
@@ -76,7 +80,7 @@ export const demoSession: EmergencySession = {
     { id: 'observation-1', kind: 'conscious', value: 'yes', source: 'user', isConfirmed: true, createdAtUtc: '2026-07-15T17:19:30.000Z' },
     { id: 'observation-2', kind: 'breathing_normally', value: 'unknown', source: 'ai', isConfirmed: false, createdAtUtc: '2026-07-15T17:19:31.000Z' },
   ],
-  protocolVersion: 'chest-pain/demo-2026.07',
+  protocolVersion: 'chest-pain/1.0.0',
   sharingFields: demoProfile.shareFields,
   tasks: [
     { id: 'task-call', title: 'Call emergency services', assignee: 'Asha', assignedParticipantId: 'participant-asha', status: 'accepted', critical: true, updatedAt: '2026-07-15T17:18:20.000Z', concurrencyToken: 'demo-task-call-v1' },
@@ -87,7 +91,7 @@ export const demoSession: EmergencySession = {
     { id: 'event-1', at: '2026-07-15T17:18:00.000Z', title: 'Emergency started', detail: 'Asha reported an emergency for a family member.', source: 'confirmed' },
     { id: 'event-2', at: '2026-07-15T17:18:12.000Z', title: 'Situation captured', detail: 'Original Hindi description preserved.', source: 'user-reported' },
     { id: 'event-3', at: '2026-07-15T17:18:20.000Z', title: 'Call marked initiated', detail: 'The user opened the phone dialler. Connection is not confirmed.', source: 'confirmed' },
-    { id: 'event-4', at: '2026-07-15T17:19:00.000Z', title: 'Chest-pain protocol selected', detail: 'Static demonstration protocol demo-2026.07.', source: 'ai-extracted' },
+    { id: 'event-4', at: '2026-07-15T17:19:00.000Z', title: 'Chest-pain protocol selected', detail: 'Static demonstration protocol chest-pain 1.0.0.', source: 'ai-extracted' },
     { id: 'event-5', at: '2026-07-15T17:20:00.000Z', title: 'Family joined', detail: 'Vikram acknowledged the request.', source: 'confirmed' },
   ],
   participantOptions: [{ id: 'participant-asha', label: 'Asha · with patient' }, { id: 'participant-vikram', label: 'Vikram · connected remotely' }],
@@ -112,11 +116,11 @@ export const defaultPreferences: Preferences = {
 };
 
 export const emptyProfile: EmergencyProfile = {
-  name: '', dateOfBirth: '', preferredLanguage: 'en', responseMode: 'text', allergies: [], conditions: [], medicines: [], procedures: [], preferredHospital: '', doctor: '', insurance: '', contacts: [], shareFields: [], reviewedAt: new Date(0).toISOString(), locationPermissionReviewed: false, qrGenerated: false,
+  name: '', dateOfBirth: '', preferredLanguage: 'en', responseMode: 'text', allergies: [], conditions: [], medicines: [], procedures: [], preferredHospital: '', doctor: '', insurance: '', contacts: [], shareFields: [], reviewedAt: '', allergyStatusCompleted: false, medicationStatusCompleted: false, sharingReviewed: false, locationPermissionReviewed: false, qrGenerated: false,
 };
 
 export const emptySession: EmergencySession = {
-  id: '', owner: '', patient: '', relationship: 'unknown', category: 'unknown', status: 'active', createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), location: '', originalInput: '', normalizedInput: '',
+  id: '', owner: '', patient: '', relationship: 'unknown', category: 'unknown', status: 'active', createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), location: '', originalInput: '', normalizedInput: '', interpretationUncertain: true,
   extraction: { detectedLanguage: 'unknown', languageConfidence: 0, incidentCategory: 'unknown', patientRelationship: 'unknown', observations: [], reportedSymptomStartTime: null, isConscious: 'unknown', isBreathingNormally: 'unknown', isHeavyBleedingReported: 'unknown', locationDescription: null, urgencyClassification: 'unknown', criticalMissingQuestions: [], handoverFacts: [], uncertainties: ['No incident interpretation is available.'], confidence: 0 },
   timeline: [], tasks: [], participants: [], participantOptions: [], participantDetails: [], patientSnapshot: null, observations: [], protocolVersion: '', sharingFields: [], emergencyNumber: '112', concurrencyToken: '',
 };

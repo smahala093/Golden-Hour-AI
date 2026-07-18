@@ -45,6 +45,11 @@ services:
       OpenAI__Model: ${OPENAI_MODEL:-gpt-4.1-mini}
       OpenAI__BaseUrl: ${OPENAI_BASE_URL:-https://api.openai.com/v1/}
       OpenAI__TimeoutSeconds: ${OPENAI_TIMEOUT_SECONDS:-15}
+      SmsGateway__Enabled: ${SMS_GATEWAY_ENABLED:-false}
+      SmsGateway__Endpoint: ${SMS_GATEWAY_ENDPOINT:-}
+      SmsGateway__SigningSecret: ${SMS_GATEWAY_SIGNING_SECRET:-}
+      SmsGateway__TimeoutSeconds: ${SMS_GATEWAY_TIMEOUT_SECONDS:-10}
+      SmsGateway__MaximumResponseBytes: ${SMS_GATEWAY_MAXIMUM_RESPONSE_BYTES:-65536}
       PublicAppUrl: ${PUBLIC_APP_URL:-http://localhost:8080}
       Emergency__DefaultNumber: ${EMERGENCY_NUMBER:-112}
       Emergency__AiConfidenceThreshold: ${AI_CONFIDENCE_THRESHOLD:-0.7}

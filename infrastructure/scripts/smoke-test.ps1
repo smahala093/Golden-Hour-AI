@@ -19,12 +19,12 @@ if ($uri.Scheme -ne 'https' -and $uri.Host -notin @('localhost', '127.0.0.1', ':
 
 & "$PSScriptRoot/health-check.ps1" -BaseUrl $base -Attempts 3 -DelaySeconds 2 -RequestTimeoutSeconds $RequestTimeoutSeconds
 
-$home = Invoke-WebRequest -Uri "$base/" -Method Get -TimeoutSec $RequestTimeoutSeconds -UseBasicParsing
-if ($home.StatusCode -ne 200) {
-    throw "The application root returned HTTP $($home.StatusCode), expected 200."
+$homeResponse = Invoke-WebRequest -Uri "$base/" -Method Get -TimeoutSec $RequestTimeoutSeconds -UseBasicParsing
+if ($homeResponse.StatusCode -ne 200) {
+    throw "The application root returned HTTP $($homeResponse.StatusCode), expected 200."
 }
 
-if ($home.Content -notmatch 'Golden Hour AI') {
+if ($homeResponse.Content -notmatch 'Golden Hour AI') {
     throw "The application root did not contain the expected product title."
 }
 

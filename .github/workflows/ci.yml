@@ -183,7 +183,8 @@ jobs:
       - name: Compile Bicep
         run: az bicep build --file infrastructure/bicep/main.bicep --outfile "${RUNNER_TEMP}/main.json"
       - name: Parse workflow YAML
-        run: ruby -e "require 'yaml'; Dir['.github/workflows/*.{yml,yaml}'].each { |f| YAML.parse_file(f); puts \"parsed #{f}\" }"
+        run: |
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].each { |file| YAML.parse_file(file); puts "parsed #{file}" }'
       - name: Parse example deployment parameters
         shell: pwsh
         run: Get-Content infrastructure/bicep/main.parameters.example.json -Raw | ConvertFrom-Json | Out-Null

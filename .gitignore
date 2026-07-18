@@ -22,6 +22,7 @@ coverage.cobertura.xml
 **/node_modules/
 .npm-cache/
 **/dist/
+**/dev-dist/
 **/coverage/
 **/.vite/
 **/.cache/

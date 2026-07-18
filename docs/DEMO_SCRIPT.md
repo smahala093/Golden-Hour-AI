@@ -20,7 +20,7 @@ Every protocol shown is **Demonstration guidance requiring clinical review befor
    ```
 
 4. Open two clean browser contexts at `http://localhost:8080`: owner and family. Keep browser zoom at 100% for the timed layout; demonstrate zoom/keyboard separately.
-5. Log the owner in as `demo@goldenhour.ai` and the family context as `family@goldenhour.ai`, using the value supplied through `Seed__DemoPassword`/`DEMO_PASSWORD`.
+5. Log the owner in as `demo@goldenhour.ai` and the family context as `family@goldenhour.ai`, using the value supplied through `Seed__DemoPassword`/`DEMO_PASSWORD`. Login alone does not authorize the family account for an emergency session.
 6. Confirm the fictional Raj Kumar demo profile is visible, Hindi is available, the emergency number reads `112`, and the UI indicates mock mode where designed.
 7. Do not proceed if the call action, disclaimer, protocol review label, or degraded-state controls are absent. Do not use a real person's details.
 
@@ -40,7 +40,7 @@ Point to the dominant emergency control and use `Tab` once or twice to show visi
 
 ### 0:20–0:45 — Start help without waiting for AI
 
-Activate **Start emergency**, choose **Help a family member**, then **Chest pain**.
+Activate **Start emergency**, choose **Help a family member**, enable **Use my saved emergency profile for this patient** only after confirming that the fictional Raj profile belongs to the patient, then choose **Chest pain**.
 
 Point to **Call 112** before entering any description:
 
@@ -62,7 +62,7 @@ If asked, answer only facts explicitly defined by the fictional scenario. Do not
 
 ### 1:15–1:40 — Reviewed protocol, not generated treatment
 
-Show the chest-pain action view. Point to protocol ID/version, review status, emergency call action, one-at-a-time layout, and the clinical-review label:
+Show the chest-pain action view. Point to the displayed protocol ID/version, emergency call action, one-at-a-time layout, and the clinical-review label:
 
 > “The model does not write this guidance. Backend safety rules select a versioned static protocol. If AI times out or fails validation, the same category-based fallback remains available.”
 
@@ -70,7 +70,7 @@ Avoid reading the whole protocol aloud. Never describe the demonstration content
 
 ### 1:40–2:10 — Coordinate the family
 
-Open the task board and assign/choose one allowlisted practical task such as **Bring identification and insurance documents** or **Guide the responder to the location**. In the family browser, accept and complete it.
+Use this two-browser segment only after it succeeds in preflight; do not improvise around a failed invitation or connection. In the owner coordination room, create a **Family** participant invitation for the fictional family member and copy the fragment-bearing invitation link without reading its token aloud. Open that link in the already signed-in family browser, choose **Accept invitation**, then **Acknowledge and open coordination**. Return to the owner task board, assign one allowlisted practical task such as **Bring identification and insurance documents** or **Guide the responder to the location** to that joined participant. In the family browser, accept and complete it.
 
 Return to the owner view and show the update/timeline:
 
@@ -84,7 +84,7 @@ Briefly show the QR/share view without reading the raw token. Point out its expi
 
 > “Anonymous access uses a short-lived token whose hash—not the raw token—is stored. It exposes only approved emergency fields; insurance, address, private documents, and complete records are hidden by default.”
 
-Open **Hospital handover** and point to the original report, chronological events, confirmed/unconfirmed labels, profile source, missing information, protocol version, language, confidence, and disclaimer.
+Open **Family summary**, **Responder brief**, and **Hospital handover**. On each screen, activate **Generate server summary** before describing its content. Point out that each click creates and persists a server snapshot from allowlisted fields. In the handover, show the original report, chronological events, confirmed/unconfirmed labels, permission-projected Raj profile snapshot, missing information, protocol version, languages, confidence, and disclaimer. Explain that family sessions do not copy a stored profile unless the initiator explicitly confirms that it belongs to the patient.
 
 ### 2:38–3:00 — Close with limits and resilience
 
@@ -101,7 +101,7 @@ Finish on the persistent call action/disclaimer:
 - Enable 200% zoom, reduced motion, or Windows forced colors and repeat keyboard navigation.
 - Deny microphone/location permissions and show immediate text/manual-location alternatives.
 - Stop the network in DevTools, reload the shell, show the stale/offline notice and reviewed protocol, then reconnect and verify one queued noncritical event syncs once.
-- Disable the mock AI provider or trigger its documented failure fixture and show a bounded static fallback—never an endless spinner.
+- Show the bounded static fallback only through a rehearsed test/development failure setup. There is no general UI failure-fixture switch, and disabling all mocks also requires valid OpenAI and SMS gateway configuration.
 
 ## Presenter safety checklist
 

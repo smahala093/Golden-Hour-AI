@@ -3,34 +3,45 @@ import { useTranslation } from 'react-i18next';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { AlertCircle, Clock3, HeartPulse, Home, Menu, Phone, Settings, ShieldCheck, Wifi, WifiOff, X } from 'lucide-react';
 import { MOCK_MODE, api } from '../api';
+import { emergencyCallNumberForRoute, shouldLogEmergencyCall } from '../callLogging';
 import { flushQueuedUpdates } from '../offline';
+import { currentPublicEmergencyNumber, hydratePublicEmergencyNumber } from '../publicEmergencyNumber';
 import { useAppState } from '../state';
 
 export function emergencyNumber(): string {
-  const configured = (import.meta.env.VITE_EMERGENCY_NUMBER as string | undefined) || '112';
-  return /^\+?[0-9]{2,15}$/.test(configured) ? configured : '112';
+  return currentPublicEmergencyNumber();
 }
 
 function EmergencyCallDock() {
   const { t } = useTranslation();
   const [announcement, setAnnouncement] = useState('');
+  const [publicNumber, setPublicNumber] = useState(emergencyNumber);
   const { session } = useAppState();
-  const number = session.emergencyNumber || emergencyNumber();
+  const location = useLocation();
+  const number = emergencyCallNumberForRoute(location.pathname, session, publicNumber);
+
+  useEffect(() => {
+    let active = true;
+    void hydratePublicEmergencyNumber().then((configured) => {
+      if (active) setPublicNumber(configured);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
 
   const handleCall = () => {
     setAnnouncement(t('action.callInitiated'));
-    if (session.id) void api.addTimeline(session.id, 'call-initiated', 'Emergency dial action initiated by the user; connection is not confirmed.').catch(() => undefined);
+    if (shouldLogEmergencyCall(location.pathname, session)) void api.addTimeline(session.id, 'call-initiated', 'Emergency dial action initiated by the user; connection is not confirmed.').catch(() => undefined);
   };
 
   return (
-    <div className="call-dock" aria-label={t('common.callEmergency')}>
+    <aside className="call-dock" aria-label={t('common.callEmergency')}>
       <a className="call-dock__button" href={`tel:${number}`} onClick={handleCall} aria-describedby="call-dock-note">
         <Phone aria-hidden="true" />
         <span>{t('common.call', { number })}</span>
       </a>
       <span id="call-dock-note" className="sr-only">{t('action.noClaim')}</span>
       <span className="sr-only" role="status" aria-live="assertive">{announcement}</span>
-    </div>
+    </aside>
   );
 }
 
@@ -40,7 +51,7 @@ function StatusStrip() {
 
   useEffect(() => {
     if (!online) return;
-    void flushQueuedUpdates((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '').then(refreshQueueCount);
+    void flushQueuedUpdates().then(refreshQueueCount);
   }, [online, refreshQueueCount]);
 
   return (

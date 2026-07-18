@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Text.RegularExpressions;
 using FluentValidation;
+using GoldenHour.Api.Infrastructure;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -41,7 +42,9 @@ public sealed class ApiExceptionHandler(
             InvalidDataException => (StatusCodes.Status400BadRequest, "Invalid request data"),
             KeyNotFoundException => (StatusCodes.Status404NotFound, "Resource not found"),
             UnauthorizedAccessException or SecurityTokenException => (StatusCodes.Status403Forbidden, "Access denied"),
+            NotificationProviderException => (StatusCodes.Status503ServiceUnavailable, "Notification provider unavailable"),
             DbUpdateConcurrencyException => (StatusCodes.Status409Conflict, "Concurrent update conflict"),
+            DbUpdateException => (StatusCodes.Status409Conflict, "Persistence conflict"),
             InvalidOperationException => (StatusCodes.Status409Conflict, "Request cannot be completed"),
             _ => (StatusCodes.Status500InternalServerError, "An unexpected error occurred")
         };
@@ -55,7 +58,9 @@ public sealed class ApiExceptionHandler(
             {
                 Status = status,
                 Title = title,
-                Detail = status >= 500 ? "The request could not be completed safely." : exception.Message,
+                Detail = exception is DbUpdateException
+                    ? "The command conflicts with existing durable state; retry safely or use a new idempotency key."
+                    : status >= 500 ? "The request could not be completed safely." : exception.Message,
                 Type = $"https://httpstatuses.io/{status}",
                 Extensions = { ["correlationId"] = context.TraceIdentifier }
             }
@@ -95,16 +100,27 @@ public sealed class SensitiveResponseCacheMiddleware(RequestDelegate next)
 {
     public async Task InvokeAsync(HttpContext context)
     {
-        var sensitive = context.Request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase)
+        var publicStaticApi = HttpMethods.IsGet(context.Request.Method)
+            && (context.Request.Path.Equals("/api/v1/protocols", StringComparison.OrdinalIgnoreCase)
+                || context.Request.Path.Equals("/api/v1/configuration", StringComparison.OrdinalIgnoreCase));
+        var sensitive = !publicStaticApi && (context.Request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase)
             || context.Request.Path.StartsWithSegments("/emergency", StringComparison.OrdinalIgnoreCase)
             || context.Request.Path.StartsWithSegments("/share", StringComparison.OrdinalIgnoreCase)
-            || context.Request.Path.StartsWithSegments("/bystander", StringComparison.OrdinalIgnoreCase);
+            || context.Request.Path.StartsWithSegments("/bystander", StringComparison.OrdinalIgnoreCase));
         if (sensitive)
         {
             context.Response.OnStarting(() =>
             {
                 context.Response.Headers.CacheControl = "no-store, private";
                 context.Response.Headers.Pragma = "no-cache";
+                return Task.CompletedTask;
+            });
+        }
+        else if (publicStaticApi)
+        {
+            context.Response.OnStarting(() =>
+            {
+                context.Response.Headers.CacheControl = "public, max-age=86400, stale-while-revalidate=604800";
                 return Task.CompletedTask;
             });
         }
@@ -119,7 +135,7 @@ public sealed class SecurityHeadersMiddleware(RequestDelegate next)
     {
         context.Response.OnStarting(() =>
         {
-            context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
+            context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
             context.Response.Headers["Referrer-Policy"] = "no-referrer";
             context.Response.Headers["X-Content-Type-Options"] = "nosniff";
             context.Response.Headers["X-Frame-Options"] = "DENY";

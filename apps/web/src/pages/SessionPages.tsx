@@ -4,9 +4,10 @@ import { QRCodeSVG } from 'qrcode.react';
 import { useTranslation } from 'react-i18next';
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
 import { AlertTriangle, Clipboard, LockKeyhole, MapPin, QrCode, UserPlus } from 'lucide-react';
-import { ApiError, api, type ParticipantInviteResult, type ShareTokenResult } from '../api';
+import { ApiError, api, type EmergencySummaryKind, type ParticipantInviteResult, type ShareTokenResult } from '../api';
 import { ConnectionBanner, PageHeading, SourceBadge, emergencyNumber } from '../components/AppShell';
 import { queueNoncriticalUpdate } from '../offline';
+import { captureAndScrubParticipantInvite, hasPendingParticipantInvite, submitPendingParticipantInvite } from '../participantInvite';
 import { useSessionConnection } from '../realtime';
 import { useAppState } from '../state';
 import type { EmergencyParticipant, EmergencyTask, ParticipantRole, PatientSnapshot, SessionObservation, TaskStatus, TriState } from '../types';
@@ -22,16 +23,29 @@ const participantRoleKeys: Record<ParticipantRole, 'room.roleOwner' | 'room.role
   owner: 'room.roleOwner', family: 'room.roleFamily', bystander: 'room.roleBystander', caregiver: 'room.roleCaregiver',
 };
 
-function SessionTabs({ id, current }: { id: string; current: 'room' | 'tasks' | 'responder' | 'handover' | 'share' }) {
+function SessionTabs({ id, current }: { id: string; current: 'room' | 'tasks' | 'family' | 'responder' | 'handover' | 'share' }) {
   const { t } = useTranslation();
   const tabs = [
     { id: 'room', to: `/emergency/${id}`, label: t('room.live') },
     { id: 'tasks', to: `/emergency/${id}/tasks`, label: t('room.tasks') },
+    { id: 'family', to: `/emergency/${id}/family-summary`, label: t('summary.familyTab') },
     { id: 'responder', to: `/emergency/${id}/responder`, label: t('room.responder') },
     { id: 'handover', to: `/emergency/${id}/handover`, label: t('room.handover') },
     { id: 'share', to: `/emergency/${id}/share`, label: t('room.share') },
   ];
   return <nav className="mobile-tabs" aria-label={t('room.title')}>{tabs.map((tab) => <Link key={tab.id} to={tab.to} aria-current={tab.id === current ? 'page' : undefined}>{tab.label}</Link>)}</nav>;
+}
+
+export function ServerSummaryCard({ sessionId, kind }: { sessionId: string; kind: EmergencySummaryKind }) {
+  const { t } = useTranslation();
+  const [notice, setNotice] = useState('');
+  const summary = useMutation({ mutationFn: () => api.generateSummary(sessionId, kind), onError: () => setNotice(t('errors.genericBody')) });
+  const copy = async () => {
+    if (!summary.data) return;
+    try { await navigator.clipboard.writeText(summary.data.content); setNotice(t('summary.copied')); }
+    catch { setNotice(t('errors.genericBody')); }
+  };
+  return <section className="card card--raised section" aria-labelledby={`server-summary-${kind}`}><h2 id={`server-summary-${kind}`}>{t(`summary.${kind === 'hospital-handover' ? 'handover' : kind}Title`)}</h2><p>{t('summary.serverNotice')}</p>{summary.data ? <><pre className="transcript summary-content">{summary.data.content}</pre><dl className="data-list"><div><dt>{t('brief.language')}</dt><dd>{summary.data.language}</dd></div><div><dt>{t('brief.protocol')}</dt><dd>{summary.data.protocolVersion}</dd></div></dl><button className="button button--secondary" type="button" onClick={() => void copy()}><Clipboard aria-hidden="true" />{t('brief.copy')}</button></> : <button className="button" type="button" disabled={summary.isPending} onClick={() => { setNotice(''); summary.mutate(); }}>{summary.isPending ? t('common.loading') : t('summary.generate')}</button>}<p role="status" aria-live="polite">{notice}</p></section>;
 }
 
 function useAuthoritativeSession() {
@@ -149,7 +163,7 @@ export function CoordinationRoomPage() {
     const message = status === 'departed' ? t('room.departureDetail') : t('room.arrivalDetail');
     try {
       await api.addTimeline(id, type, message);
-      const event = { id: crypto.randomUUID(), at: new Date().toISOString(), title: status === 'departed' ? t('room.markDeparted') : t('room.markArrived'), detail: message, source: 'confirmed' as const };
+      const event = { id: crypto.randomUUID(), at: new Date().toISOString(), title: status === 'departed' ? t('room.markDeparted') : t('room.markArrived'), detail: message, source: 'user-reported' as const };
       setSession({ ...session, status, timeline: [...session.timeline, event], updatedAt: event.at });
       setNotice(event.title);
     } catch {
@@ -271,22 +285,22 @@ function PatientSnapshotDetails({ snapshot }: { snapshot: PatientSnapshot | null
 function ObservationFacts({ observations }: { observations: SessionObservation[] }) {
   const { t } = useTranslation();
   if (observations.length === 0) return <p>{t('common.unknown')}</p>;
-  return <ul className="plain-list">{observations.map((observation) => <li key={observation.id}><strong>{observation.kind.replaceAll('_', ' ')}:</strong> {observation.value} <SourceBadge source={observation.isConfirmed ? 'confirmed' : observation.source.toLowerCase().includes('ai') ? 'ai-extracted' : 'user-reported'} /></li>)}</ul>;
+  const kindLabel = (kind: string) => ({ conscious: t('brief.conscious'), breathingnormally: t('brief.breathing'), severebleeding: t('brief.bleeding') } as Record<string, string>)[kind.replaceAll(/[^a-z]/gi, '').toLowerCase()] ?? kind.replaceAll('_', ' ');
+  const valueLabel = (value: string) => ({ yes: t('common.yes'), no: t('common.no'), unknown: t('common.unknown') } as Record<string, string>)[value.toLowerCase()] ?? value;
+  return <ul className="plain-list">{observations.map((observation) => <li key={observation.id}><strong>{kindLabel(observation.kind)}:</strong> {valueLabel(observation.value)} <SourceBadge source={observation.isConfirmed ? 'confirmed' : observation.source.toLowerCase().includes('ai') ? 'ai-extracted' : 'user-reported'} /></li>)}</ul>;
 }
 
 export function ResponderBriefPage() {
   const { t } = useTranslation();
   const { id, session, error, mismatchOffline } = useAuthoritativeSession();
-  const [copied, setCopied] = useState(false);
   if (!session) return <SessionFailure error={error} mismatchOffline={mismatchOffline} />;
   const snapshot = session.patientSnapshot;
   const confirmedObservations = session.observations.filter((observation) => observation.isConfirmed);
-  const briefText = `${session.patient || t('common.unknown')}\n${session.location || t('common.unknown')}\n${confirmedObservations.map((observation) => `${observation.kind}: ${observation.value}`).join('; ')}\n${t('brief.allergies')}: ${snapshot?.allergies.join(', ') || t('common.unknown')}\n${t('brief.protocol')}: ${session.protocolVersion || t('common.unknown')}\n${t('brief.confidence')}: ${Math.round(session.extraction.confidence * 100)}%`;
-  const copy = async () => { await navigator.clipboard.writeText(briefText); setCopied(true); };
   return (
     <div>
-      <PageHeading eyebrow={session.id} title={t('brief.responderTitle')} description={t('brief.responderIntro')}><button className="button button--secondary" type="button" onClick={() => void copy()}><Clipboard aria-hidden="true" />{t('brief.copy')}</button></PageHeading>
+      <PageHeading eyebrow={session.id} title={t('brief.responderTitle')} description={t('brief.responderIntro')} />
       <SessionTabs id={id} current="responder" />
+      <ServerSummaryCard sessionId={id} kind="responder" />
       <article className="card card--raised section">
         <section className="brief-section"><h2>{t('brief.identity')}</h2><dl className="data-list"><div><dt>{t('brief.identity')}</dt><dd>{snapshot?.fullName || t('common.unknown')} {snapshot && <SourceBadge source="profile" />}</dd></div><div><dt>{t('room.location')}</dt><dd>{session.location || t('common.unknown')} <SourceBadge source="user-reported" /></dd></div></dl></section>
         <section className="brief-section"><h2>{t('brief.confirmed')}</h2><ObservationFacts observations={confirmedObservations} /></section>
@@ -294,7 +308,7 @@ export function ResponderBriefPage() {
         <PatientSnapshotDetails snapshot={snapshot} />
         <section className="brief-section"><h2>{t('brief.uncertainty')}</h2><FactList values={session.extraction.uncertainties} source="unknown" /><p>{t('brief.confidence')}: {Math.round(session.extraction.confidence * 100)}%</p></section>
       </article>
-      <p className="disclaimer">{t('common.protocolDisclaimer')}</p><p className="sr-only" role="status" aria-live="polite">{copied ? t('brief.copied') : ''}</p>
+      <p className="disclaimer">{t('common.protocolDisclaimer')}</p>
     </div>
   );
 }
@@ -310,6 +324,7 @@ export function HospitalHandoverPage() {
     <div>
       <PageHeading eyebrow={session.id} title={t('brief.handoverTitle')} description={t('brief.handoverIntro')}><button className="button button--secondary" type="button" onClick={() => window.print()}>{t('common.save')}</button></PageHeading>
       <SessionTabs id={id} current="handover" />
+      <ServerSummaryCard sessionId={id} kind="hospital-handover" />
       <article className="card card--raised section">
         <section className="brief-section"><h2>{t('brief.original')}</h2><p className="transcript" lang={/^hi(?:ndi)?$/i.test(session.extraction.detectedLanguage) ? 'hi' : undefined}>{session.originalInput}</p><SourceBadge source="user-reported" /></section>
         <section className="brief-section"><h2>{t('brief.confirmed')}</h2><ObservationFacts observations={confirmedObservations} /></section>
@@ -321,6 +336,13 @@ export function HospitalHandoverPage() {
       <p className="disclaimer">{t('common.protocolDisclaimer')}</p>
     </div>
   );
+}
+
+export function FamilySummaryPage() {
+  const { t } = useTranslation();
+  const { id, session, error, mismatchOffline } = useAuthoritativeSession();
+  if (!session) return <SessionFailure error={error} mismatchOffline={mismatchOffline} />;
+  return <div><PageHeading eyebrow={session.id} title={t('summary.familyTitle')} description={t('summary.familyIntro')} /><SessionTabs id={id} current="family" /><ServerSummaryCard sessionId={id} kind="family" /><p className="disclaimer">{t('common.protocolDisclaimer')}</p></div>;
 }
 
 export function ShareQrPage() {
@@ -352,23 +374,22 @@ export function JoinParticipantPage() {
   const { sessionId = '' } = useParams();
   const navigate = useNavigate();
   const { setSession } = useAppState();
-  const [token, setToken] = useState(() => {
-    const raw = window.location.hash.slice(1);
-    if (!raw || raw.length > 1_024) return '';
-    try { return decodeURIComponent(raw); } catch { return ''; }
-  });
+  const [fragmentScrubbed, setFragmentScrubbed] = useState(() => !window.location.hash);
+  const [invitationAvailable, setInvitationAvailable] = useState(() => hasPendingParticipantInvite(sessionId));
   const [participant, setParticipant] = useState<EmergencyParticipant | null>(null);
   const [error, setError] = useState('');
 
   useLayoutEffect(() => {
-    if (window.location.hash) window.history.replaceState(window.history.state, document.title, `${window.location.pathname}${window.location.search}`);
-  }, []);
+    if (window.location.hash) captureAndScrubParticipantInvite(sessionId);
+    setInvitationAvailable(hasPendingParticipantInvite(sessionId));
+    setFragmentScrubbed(true);
+  }, [sessionId]);
 
   const join = useMutation({
-    mutationFn: () => api.joinParticipant(sessionId, token),
+    mutationFn: () => submitPendingParticipantInvite(sessionId, (token) => api.joinParticipant(sessionId, token)),
     onSuccess: (joinedParticipant) => {
       setParticipant(joinedParticipant);
-      setToken('');
+      setInvitationAvailable(false);
       setError('');
     },
     onError: () => setError(t('join.error')),
@@ -381,7 +402,8 @@ export function JoinParticipantPage() {
     onError: () => setError(t('errors.genericBody')),
   });
 
-  if (!token && !participant) return <section className="centered-state"><AlertTriangle aria-hidden="true" size={44} /><h1>{t('join.title')}</h1><p>{t('join.missing')}</p><Link className="button" to="/home">{t('errors.home')}</Link></section>;
+  if (!fragmentScrubbed) return <section className="centered-state" role="status"><p>{t('common.loading')}</p></section>;
+  if (!invitationAvailable && !participant) return <section className="centered-state"><AlertTriangle aria-hidden="true" size={44} /><h1>{t('join.title')}</h1><p>{t('join.missing')}</p><Link className="button" to="/home">{t('errors.home')}</Link></section>;
   return (
     <section className="card card--raised stack auth-card">
       <PageHeading title={t('join.title')} description={t('join.intro')} />
@@ -401,13 +423,15 @@ export function BystanderPage() {
   });
   const [answers, setAnswers] = useState<{ conscious?: TriState; breathingNormally?: TriState; severeBleeding?: TriState }>({});
   const [notice, setNotice] = useState('');
+  const [fragmentScrubbed, setFragmentScrubbed] = useState(() => !window.location.hash);
   useLayoutEffect(() => {
     if (window.location.hash) window.history.replaceState(window.history.state, document.title, `${window.location.pathname}${window.location.search}`);
+    setFragmentScrubbed(true);
   }, []);
-  const query = useQuery({ queryKey: ['bystander-share'], queryFn: () => api.getBystander(token), enabled: Boolean(token), retry: false, gcTime: 0 });
+  const query = useQuery({ queryKey: ['bystander-share'], queryFn: () => api.getBystander(token), enabled: Boolean(token) && fragmentScrubbed, retry: false, gcTime: 0 });
   const view = query.data;
   const language = (i18n.resolvedLanguage ?? i18n.language).split('-')[0] ?? 'en';
-  const protocolQuery = useQuery({ queryKey: ['bystander-protocol', view?.category, language], queryFn: () => loadCachedProtocol((view?.category ?? 'unknown') as IncidentCategory, language), enabled: Boolean(view), staleTime: Infinity });
+  const protocolQuery = useQuery({ queryKey: ['bystander-protocol', view?.category], queryFn: () => loadCachedProtocol((view?.category ?? 'unknown') as IncidentCategory), enabled: Boolean(view) && !view?.protocol, staleTime: Infinity });
   const report = useMutation({ mutationFn: () => api.reportBystanderObservation(token, answers), onSuccess: () => setNotice(t('common.done')), onError: () => setNotice(t('errors.genericBody')) });
 
   const shareLocation = () => {
@@ -426,7 +450,7 @@ export function BystanderPage() {
   if (query.isPending) return <section className="centered-state" role="status"><p>{t('common.loading')}</p></section>;
   if (query.isError || !query.data) return <section className="centered-state"><AlertTriangle aria-hidden="true" size={44} /><h1>{t('bystander.expired')}</h1><p>{t('bystander.noRecords')}</p></section>;
   const resolvedView = query.data;
-  const protocol = protocolQuery.data ?? resolvedView.protocol;
+  const protocol = resolvedView.protocol ?? protocolQuery.data;
   const number = resolvedView.emergencyNumber || emergencyNumber();
   const choices: { value: TriState; label: string }[] = [{ value: 'yes', label: t('common.yes') }, { value: 'no', label: t('common.no') }, { value: 'unknown', label: t('common.unknown') }];
   const fields = [
@@ -439,6 +463,7 @@ export function BystanderPage() {
     <div>
       <PageHeading eyebrow={t('bystander.limited')} title={t('bystander.title')} description={[resolvedView.patientName, resolvedView.approximateAge].filter(Boolean).join(' · ') || t('common.unknown')} />
       <a className="button button--danger button--full" href={`tel:${number}`}>{t('bystander.call', { number })}</a>
+      {language !== 'en' && <p className="permission-note" role="status">{t('action.translationFallback')}</p>}
       <div className="two-column section">
         <section className="card card--raised"><h2>{resolvedView.patientName ?? t('common.unknown')}</h2><dl className="data-list"><div><dt>{t('room.location')}</dt><dd>{resolvedView.location || t('common.unknown')}</dd></div><div><dt>{t('brief.allergies')}</dt><dd>{resolvedView.allergies.join(', ') || t('common.unknown')}</dd></div><div><dt>{t('brief.conditions')}</dt><dd>{resolvedView.conditions.join(', ') || t('common.unknown')}</dd></div><div><dt>{t('brief.medicines')}</dt><dd>{resolvedView.medicines.join(', ') || t('common.unknown')}</dd></div>{resolvedView.emergencyContact && <div><dt>{t('brief.contact')}</dt><dd>{resolvedView.emergencyContact.name} · {resolvedView.emergencyContact.relationship} · <a href={`tel:${resolvedView.emergencyContact.phone.replace(/[^+0-9]/g, '')}`}>{resolvedView.emergencyContact.phone}</a></dd></div>}</dl></section>
         <form className="card stack" onSubmit={(event) => { event.preventDefault(); report.mutate(); }}><h2>{t('bystander.report')}</h2>{fields.map((field) => <fieldset className="fieldset" key={field.id}><legend>{t(field.key)}</legend><div className="answer-grid">{choices.map((choice) => <button key={choice.value} className="answer-button" type="button" aria-pressed={answers[field.id as keyof typeof answers] === choice.value} onClick={() => setAnswers((current) => ({ ...current, [field.id]: choice.value }))}>{choice.label}</button>)}</div></fieldset>)}<button className="button" type="submit" disabled={Object.keys(answers).length === 0 || report.isPending}>{t('common.save')}</button><button className="button button--secondary" type="button" onClick={shareLocation}><MapPin aria-hidden="true" />{t('bystander.location')}</button><p className="field-hint">{t('bystander.consent')}</p></form>

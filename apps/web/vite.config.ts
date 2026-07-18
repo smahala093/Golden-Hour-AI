@@ -27,7 +27,7 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: '/index.html',
-        globPatterns: ['**/*.{js,css,html,svg,json,woff2}'],
+        globPatterns: ['**/*.{js,css,html,svg,png,json,woff2}'],
         runtimeCaching: [
           {
             urlPattern: ({ url }) => url.pathname === '/api/v1/protocols' && url.searchParams.get('country') === 'IN',

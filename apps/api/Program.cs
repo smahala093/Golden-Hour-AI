@@ -18,6 +18,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -33,7 +34,13 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.Services.AddValidatorsFromAssemblyContaining<IncidentExtractionValidator>();
 var configuredUseMocks = builder.Configuration.GetValue("Providers:UseMocks", true);
 builder.Services.AddOptions<EmergencyOptions>().Bind(builder.Configuration.GetSection("Emergency"))
-    .Validate(x => !string.IsNullOrWhiteSpace(x.DefaultNumber) && x.AiConfidenceThreshold is >= 0 and <= 1, "Emergency configuration is invalid.")
+    .Validate(x => !string.IsNullOrWhiteSpace(x.DefaultNumber)
+        && x.DefaultNumber.Length is >= 2 and <= 16
+        && (x.DefaultNumber[0] == '+'
+            ? x.DefaultNumber.Length >= 3 && x.DefaultNumber.AsSpan(1).ToArray().All(char.IsAsciiDigit)
+            : x.DefaultNumber.All(char.IsAsciiDigit))
+        && x.AiConfidenceThreshold is >= 0 and <= 1,
+        "Emergency configuration requires a safe 2 to 16 character telephone number and a confidence threshold from zero to one.")
     .ValidateOnStart();
 builder.Services.AddOptions<AuthenticationOptions>().Bind(builder.Configuration.GetSection("Authentication"))
     .Validate(x => !string.IsNullOrWhiteSpace(x.Jwt.Issuer) && !string.IsNullOrWhiteSpace(x.Jwt.Audience)
@@ -47,7 +54,17 @@ builder.Services.AddOptions<OpenAiOptions>().Bind(builder.Configuration.GetSecti
     .Validate(x => configuredUseMocks || !string.IsNullOrWhiteSpace(x.ApiKey), "OpenAI API key is required when provider mocks are disabled.")
     .ValidateOnStart();
 builder.Services.AddOptions<WebhookOptions>().Bind(builder.Configuration.GetSection("Webhook"))
-    .Validate(x => !x.Enabled || (!string.IsNullOrWhiteSpace(x.SigningSecret) && x.SigningSecret.Length >= 16), "An enabled webhook requires a signing secret of at least 16 characters.")
+    .Validate(x => !x.Enabled || (!string.IsNullOrWhiteSpace(x.SigningSecret) && x.SigningSecret.Length >= 16
+        && x.AllowedClockSkewMinutes is >= 1 and <= 15 && x.AllowedProviders is { Length: > 0 } && x.AllowedStatuses is { Length: > 0 }),
+        "An enabled webhook requires a signing secret, bounded clock skew, providers, and statuses.")
+    .ValidateOnStart();
+builder.Services.AddOptions<SmsGatewayOptions>().Bind(builder.Configuration.GetSection("SmsGateway"))
+    .Validate(options => configuredUseMocks || (options.Enabled
+        && Uri.TryCreate(options.Endpoint, UriKind.Absolute, out var endpoint) && endpoint.Scheme == Uri.UriSchemeHttps
+        && Encoding.UTF8.GetByteCount(options.SigningSecret) >= 32
+        && options.TimeoutSeconds is >= 2 and <= 30
+        && options.MaximumResponseBytes is >= 1_024 and <= 65_536),
+        "A production SMS gateway requires an HTTPS endpoint, a 32-byte signing secret, and bounded timeout/response settings.")
     .ValidateOnStart();
 
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
@@ -56,6 +73,15 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
     foreach (var proxy in builder.Configuration.GetSection("Security:KnownProxies").Get<string[]>() ?? [])
     {
         if (IPAddress.TryParse(proxy, out var address)) options.KnownProxies.Add(address);
+    }
+    foreach (var network in builder.Configuration.GetSection("Security:KnownNetworks").Get<string[]>() ?? [])
+    {
+        var parts = network.Split('/', 2, StringSplitOptions.TrimEntries);
+        if (parts.Length == 2 && IPAddress.TryParse(parts[0], out var prefix)
+            && int.TryParse(parts[1], out var prefixLength))
+        {
+            options.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(prefix, prefixLength));
+        }
     }
 });
 builder.Services.AddHsts(options =>
@@ -199,6 +225,7 @@ builder.Services.AddSingleton<PromptTemplateStore>();
 builder.Services.AddSingleton<IncidentDataMinimizer>();
 builder.Services.AddScoped<IncidentUnderstandingService>();
 builder.Services.AddScoped<ProfileCoordinator>();
+builder.Services.AddScoped<ContactVerificationCoordinator>();
 builder.Services.AddScoped<SessionCoordinator>();
 builder.Services.AddScoped<ShareTokenCoordinator>();
 builder.Services.AddScoped<ParticipantCoordinator>();
@@ -209,18 +236,25 @@ builder.Services.AddSingleton<IEventBus, NullEventBus>();
 builder.Services.AddSingleton<IFileStorage, UnavailableFileStorage>();
 builder.Services.AddSingleton<IMapProvider, MockMapProvider>();
 builder.Services.AddSingleton<MockNotificationProvider>();
-builder.Services.AddSingleton<ISmsProvider>(provider => provider.GetRequiredService<MockNotificationProvider>());
 builder.Services.AddSingleton<IEmailProvider>(provider => provider.GetRequiredService<MockNotificationProvider>());
 builder.Services.AddSingleton<INotificationProvider>(provider => provider.GetRequiredService<MockNotificationProvider>());
 
 if (configuredUseMocks)
 {
+    builder.Services.AddSingleton<ISmsProvider>(provider => provider.GetRequiredService<MockNotificationProvider>());
     builder.Services.AddSingleton<IAiProvider, MockAiProvider>();
     builder.Services.AddSingleton<ISpeechToTextProvider, MockSpeechToTextProvider>();
     builder.Services.AddSingleton<ITextToSpeechProvider, MockTextToSpeechProvider>();
 }
 else
 {
+    builder.Services.AddHttpClient<HmacSmsGatewayProvider>((serviceProvider, client) =>
+    {
+        var configured = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<SmsGatewayOptions>>().Value;
+        client.Timeout = TimeSpan.FromSeconds(configured.TimeoutSeconds);
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("GoldenHourAI-SmsGateway/1.0");
+    });
+    builder.Services.AddScoped<ISmsProvider>(provider => provider.GetRequiredService<HmacSmsGatewayProvider>());
     builder.Services.AddHttpClient<OpenAiResponsesProvider>((serviceProvider, client) => ConfigureOpenAiClient(serviceProvider, client));
     builder.Services.AddHttpClient<OpenAiSpeechToTextProvider>((serviceProvider, client) => ConfigureOpenAiClient(serviceProvider, client));
     builder.Services.AddHttpClient<OpenAiTextToSpeechProvider>((serviceProvider, client) => ConfigureOpenAiClient(serviceProvider, client));
@@ -232,7 +266,7 @@ builder.Services.AddHostedService<OutboxDispatcher>();
 
 var app = builder.Build();
 if (app.Configuration.GetValue<bool>("Security:UseForwardedHeaders")) app.UseForwardedHeaders();
-if (app.Environment.IsProduction())
+if (!app.Environment.IsDevelopment())
 {
     app.UseHsts();
     if (app.Configuration.GetValue("Security:RequireHttps", true)) app.UseHttpsRedirection();
@@ -273,6 +307,8 @@ if (app.Environment.IsDevelopment())
 }
 
 var api = app.MapGroup("/api/v1");
+api.MapGet("/configuration", (IOptions<EmergencyOptions> emergencyOptions) =>
+    Results.Ok(new { emergencyNumber = emergencyOptions.Value.DefaultNumber })).AllowAnonymous();
 api.MapGet("/protocols", (string? country, ProtocolCatalogue catalogue) =>
     Results.Ok(catalogue.List(string.IsNullOrWhiteSpace(country) ? "IN" : country))).AllowAnonymous();
 var auth = api.MapGroup("/auth").RequireRateLimiting("auth");
@@ -305,7 +341,15 @@ auth.MapPost("/register", async Task<IResult> (
     }
     try
     {
-        dbContext.EmergencyProfiles.Add(new EmergencyProfile { OwnerId = user.Id, PreferredLanguage = user.PreferredLanguage });
+        var profile = new EmergencyProfile { OwnerId = user.Id, PreferredLanguage = user.PreferredLanguage };
+        dbContext.EmergencyProfiles.Add(profile);
+        dbContext.AuditEvents.Add(new AuditEvent
+        {
+            ActorUserId = user.Id,
+            Action = "emergency-profile-created",
+            ResourceType = "EmergencyProfile",
+            ResourceId = profile.Id.ToString()
+        });
         await dbContext.SaveChangesAsync(cancellationToken);
     }
     catch
@@ -321,16 +365,39 @@ auth.MapPost("/register", async Task<IResult> (
 auth.MapPost("/login", async Task<IResult> (
     LoginRequest request,
     UserManager<ApplicationUser> userManager,
+    GoldenHourDbContext dbContext,
     TokenService tokenService,
     HttpContext context,
     CancellationToken cancellationToken) =>
 {
+    if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Password))
+        return Results.Problem(statusCode: 401, title: "Invalid credentials");
     var user = await userManager.FindByEmailAsync(request.Email.Trim());
     if (user is null) return Results.Problem(statusCode: 401, title: "Invalid credentials");
-    if (await userManager.IsLockedOutAsync(user)) return Results.Problem(statusCode: 423, title: "Account temporarily locked");
+    if (await userManager.IsLockedOutAsync(user))
+    {
+        dbContext.AuditEvents.Add(new AuditEvent
+        {
+            Action = "authentication-rejected-account-locked",
+            ResourceType = "ApplicationUser",
+            ResourceId = user.Id.ToString()
+        });
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return Results.Problem(statusCode: 401, title: "Invalid credentials");
+    }
     if (!await userManager.CheckPasswordAsync(user, request.Password))
     {
         await userManager.AccessFailedAsync(user);
+        if (await userManager.IsLockedOutAsync(user))
+        {
+            dbContext.AuditEvents.Add(new AuditEvent
+            {
+                Action = "authentication-rejected-account-locked",
+                ResourceType = "ApplicationUser",
+                ResourceId = user.Id.ToString()
+            });
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
         return Results.Problem(statusCode: 401, title: "Invalid credentials");
     }
     await userManager.ResetAccessFailedCountAsync(user);
@@ -385,6 +452,36 @@ api.MapPut("/profile", async Task<IResult> (ProfileUpsertRequest request, HttpCo
         : Results.Ok(await coordinator.UpsertAsync(RequireUserId(context.User), request, cancellationToken));
 }).RequireAuthorization();
 
+api.MapPost("/profile/contacts/{contactId:guid}/verification", async Task<IResult> (
+    Guid contactId,
+    HttpContext context,
+    IWebHostEnvironment environment,
+    ISmsProvider smsProvider,
+    ContactVerificationCoordinator coordinator,
+    CancellationToken cancellationToken) =>
+{
+    if (smsProvider is MockNotificationProvider && !(environment.IsDevelopment() && configuredUseMocks))
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Contact verification delivery is unavailable",
+            detail: "Configure a production SMS provider before requesting contact verification.");
+    var includeDevelopmentCode = environment.IsDevelopment() && configuredUseMocks && smsProvider is MockNotificationProvider;
+    return Results.Accepted(value: await coordinator.RequestAsync(
+        RequireUserId(context.User), contactId, includeDevelopmentCode, cancellationToken));
+}).RequireAuthorization().RequireRateLimiting("auth");
+
+api.MapPost("/profile/contacts/{contactId:guid}/verification/confirm", async Task<IResult> (
+    Guid contactId,
+    ConfirmContactVerificationRequest request,
+    HttpContext context,
+    ContactVerificationCoordinator coordinator,
+    CancellationToken cancellationToken) =>
+{
+    await coordinator.VerifyAsync(
+        RequireUserId(context.User), contactId, request.Challenge, request.Code, cancellationToken);
+    return Results.NoContent();
+}).RequireAuthorization().RequireRateLimiting("auth");
+
 api.MapGet("/readiness", async (HttpContext context, ProfileCoordinator coordinator, CancellationToken cancellationToken) =>
     Results.Ok(await coordinator.ReadinessAsync(RequireUserId(context.User), cancellationToken))).RequireAuthorization();
 
@@ -411,9 +508,15 @@ sessions.MapPost("/{sessionId:guid}/incident", async (Guid sessionId, SubmitInci
 
 sessions.MapPost("/{sessionId:guid}/voice", async Task<IResult> (Guid sessionId, HttpRequest request, HttpContext context, ISpeechToTextProvider speech, SessionCoordinator coordinator, CancellationToken cancellationToken) =>
 {
+    var userId = TryGetUserId(context.User);
+    var anonymousAccessToken = GetAnonymousSessionToken(request);
+    await coordinator.EnsureAuthorizedAsync(sessionId, userId, anonymousAccessToken, cancellationToken);
     if (!request.HasFormContentType) return Results.Problem(statusCode: 415, title: "Multipart audio upload required");
     if (request.ContentLength is > 5_505_024) return Results.Problem(statusCode: 413, title: "Audio upload is too large");
     var form = await request.ReadFormAsync(cancellationToken);
+    var languageHint = form["languageHint"].FirstOrDefault();
+    if (!IsValidLanguageHint(languageHint))
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["languageHint"] = ["Use a bounded BCP-47 style language tag, such as en or hi-IN."] });
     var audio = form.Files.GetFile("audio");
     if (audio is null || audio.Length == 0) return Results.ValidationProblem(new Dictionary<string, string[]> { ["audio"] = ["A non-empty audio recording is required."] });
     if (audio.Length > 5 * 1024 * 1024) return Results.Problem(statusCode: 413, title: "Audio upload is too large");
@@ -421,10 +524,12 @@ sessions.MapPost("/{sessionId:guid}/voice", async Task<IResult> (Guid sessionId,
     if (!allowed.Contains(audio.ContentType)) return Results.Problem(statusCode: 415, title: "Unsupported audio format");
     if (!await HasValidAudioSignatureAsync(audio, cancellationToken)) return Results.Problem(statusCode: 415, title: "Audio content does not match its declared format");
     await using var stream = audio.OpenReadStream();
-    var transcription = await speech.TranscribeAsync(stream, audio.ContentType, form["languageHint"].FirstOrDefault(), cancellationToken);
-    var response = await coordinator.SubmitIncidentAsync(sessionId, TryGetUserId(context.User),
+    var transcription = await speech.TranscribeAsync(stream, audio.ContentType, string.IsNullOrWhiteSpace(languageHint) ? null : languageHint.Trim(), cancellationToken);
+    if (transcription.DurationSeconds is null or <= 0 or > 30)
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["audio"] = ["Audio duration must be provider-confirmed and no longer than 30 seconds."] });
+    var response = await coordinator.SubmitIncidentAsync(sessionId, userId,
         new SubmitIncidentRequest(transcription.OriginalTranscript, transcription.DetectedLanguage, null),
-        request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty, cancellationToken, GetAnonymousSessionToken(request));
+        request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty, cancellationToken, anonymousAccessToken);
     return Results.Ok(response);
 }).AllowAnonymous().RequireRateLimiting("anonymous-start").DisableAntiforgery()
     .WithMetadata(new RequestSizeLimitAttribute(5_505_024), new RequestFormLimitsAttribute { MultipartBodyLengthLimit = 5_505_024 });
@@ -438,6 +543,13 @@ sessions.MapPost("/{sessionId:guid}/protocol-audio", async Task<IResult> (
 {
     var session = await coordinator.GetAsync(sessionId, TryGetUserId(context.User), GetAnonymousSessionToken(context.Request), cancellationToken);
     if (session.Protocol is null) return Results.Problem(statusCode: 409, title: "Select a reviewed protocol before requesting read-aloud audio");
+    if (speech is MockTextToSpeechProvider)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Read-aloud audio is unavailable in deterministic mock mode",
+            detail: "Use the reviewed protocol text displayed on screen.");
+    }
     var audio = await speech.SynthesizeAsync(CreateApprovedProtocolNarration(session.Protocol), session.OriginalLanguage ?? "en", cancellationToken);
     return Results.Stream(audio, "audio/mpeg", enableRangeProcessing: false);
 }).AllowAnonymous().RequireRateLimiting("anonymous-start");
@@ -462,13 +574,15 @@ sessions.MapPost("/{sessionId:guid}/locations", async (Guid sessionId, LocationU
     Results.Ok(await coordinator.AddLocationAsync(sessionId, TryGetUserId(context.User), request, cancellationToken, GetAnonymousSessionToken(context.Request)))).AllowAnonymous();
 
 sessions.MapPost("/{sessionId:guid}/tasks", async (Guid sessionId, CreateTaskRequest request, HttpContext context, SessionCoordinator coordinator, CancellationToken cancellationToken) =>
-    Results.Ok(await coordinator.AddTaskAsync(sessionId, RequireUserId(context.User), request, cancellationToken))).RequireAuthorization();
+    Results.Ok(await coordinator.AddTaskAsync(sessionId, RequireUserId(context.User), request,
+        context.Request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty, cancellationToken))).RequireAuthorization();
 
 sessions.MapPatch("/{sessionId:guid}/tasks/{taskId:guid}", async (Guid sessionId, Guid taskId, UpdateTaskRequest request, HttpContext context, SessionCoordinator coordinator, CancellationToken cancellationToken) =>
     Results.Ok(await coordinator.UpdateTaskAsync(sessionId, taskId, RequireUserId(context.User), request, cancellationToken))).RequireAuthorization();
 
 sessions.MapPost("/{sessionId:guid}/share-tokens", async (Guid sessionId, CreateShareTokenRequest request, HttpContext context, ShareTokenCoordinator coordinator, CancellationToken cancellationToken) =>
-    Results.Ok(await coordinator.CreateAsync(sessionId, RequireUserId(context.User), request.LifetimeMinutes, cancellationToken))).RequireAuthorization();
+    Results.Ok(await coordinator.CreateAsync(sessionId, RequireUserId(context.User), request.LifetimeMinutes,
+        context.Request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty, cancellationToken))).RequireAuthorization();
 
 sessions.MapDelete("/{sessionId:guid}/share-tokens/{tokenId:guid}", async (Guid sessionId, Guid tokenId, HttpContext context, ShareTokenCoordinator coordinator, CancellationToken cancellationToken) =>
 {
@@ -477,7 +591,8 @@ sessions.MapDelete("/{sessionId:guid}/share-tokens/{tokenId:guid}", async (Guid 
 }).RequireAuthorization();
 
 sessions.MapPost("/{sessionId:guid}/participants/invitations", async (Guid sessionId, InviteParticipantRequest request, HttpContext context, ParticipantCoordinator coordinator, CancellationToken cancellationToken) =>
-    Results.Ok(await coordinator.InviteAsync(sessionId, RequireUserId(context.User), request, cancellationToken))).RequireAuthorization();
+    Results.Ok(await coordinator.InviteAsync(sessionId, RequireUserId(context.User), request,
+        context.Request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty, cancellationToken))).RequireAuthorization();
 
 sessions.MapPost("/{sessionId:guid}/participants/join", async (Guid sessionId, JoinParticipantRequest request, HttpContext context, ParticipantCoordinator coordinator, CancellationToken cancellationToken) =>
     Results.Ok(await coordinator.JoinAsync(sessionId, RequireUserId(context.User), request.Token, cancellationToken))).RequireAuthorization().RequireRateLimiting("bystander");
@@ -494,27 +609,12 @@ sessions.MapPost("/{sessionId:guid}/summaries/{kind}", async Task<IResult> (Guid
 sessions.MapPost("/{sessionId:guid}/close", async (Guid sessionId, CloseSessionRequest request, HttpContext context, SessionCoordinator coordinator, CancellationToken cancellationToken) =>
     Results.Ok(await coordinator.CloseAsync(sessionId, RequireUserId(context.User), request.ConcurrencyToken, cancellationToken))).RequireAuthorization();
 
-api.MapGet("/bystander/{token}", async (string token, ShareTokenCoordinator coordinator, CancellationToken cancellationToken) =>
-    Results.Ok(await coordinator.GetProjectionAsync(token, cancellationToken))).AllowAnonymous().RequireRateLimiting("bystander");
-
 api.MapGet("/bystander", async (HttpRequest request, ShareTokenCoordinator coordinator, CancellationToken cancellationToken) =>
     Results.Ok(await coordinator.GetProjectionAsync(GetBystanderShareToken(request), cancellationToken))).AllowAnonymous().RequireRateLimiting("bystander");
-
-api.MapPost("/bystander/{token}/observations", async (string token, BystanderObservationRequest request, HttpContext context, ShareTokenCoordinator coordinator, CancellationToken cancellationToken) =>
-{
-    await coordinator.RecordObservationAsync(token, request, context.Request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty, cancellationToken);
-    return Results.Accepted();
-}).AllowAnonymous().RequireRateLimiting("bystander");
 
 api.MapPost("/bystander/observations", async (BystanderObservationRequest request, HttpContext context, ShareTokenCoordinator coordinator, CancellationToken cancellationToken) =>
 {
     await coordinator.RecordObservationAsync(GetBystanderShareToken(context.Request), request, context.Request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty, cancellationToken);
-    return Results.Accepted();
-}).AllowAnonymous().RequireRateLimiting("bystander");
-
-api.MapPost("/bystander/{token}/location", async (string token, BystanderLocationRequest request, HttpContext context, ShareTokenCoordinator coordinator, CancellationToken cancellationToken) =>
-{
-    await coordinator.RecordLocationAsync(token, request, context.Request.Headers["Idempotency-Key"].FirstOrDefault() ?? string.Empty, cancellationToken);
     return Results.Accepted();
 }).AllowAnonymous().RequireRateLimiting("bystander");
 
@@ -583,14 +683,22 @@ static async Task<bool> HasValidAudioSignatureAsync(IFormFile audio, Cancellatio
     var read = await stream.ReadAsync(header, cancellationToken);
     return audio.ContentType.ToLowerInvariant() switch
     {
-        "audio/webm" => read >= 4 && header.AsSpan(0, 4).SequenceEqual(new byte[] { 0x1A, 0x45, 0xDF, 0xA3 }),
-        "audio/wav" or "audio/x-wav" => read >= 12 && header.AsSpan(0, 4).SequenceEqual("RIFF"u8) && header.AsSpan(8, 4).SequenceEqual("WAVE"u8),
-        "audio/mpeg" => read >= 3 && (header.AsSpan(0, 3).SequenceEqual("ID3"u8) || (header[0] == 0xFF && (header[1] & 0xE0) == 0xE0)),
-        "audio/mp4" => read >= 8 && header.AsSpan(4, 4).SequenceEqual("ftyp"u8),
-        "audio/ogg" => read >= 4 && header.AsSpan(0, 4).SequenceEqual("OggS"u8),
+        "audio/webm" => audio.Length >= 32 && read >= 4 && header.AsSpan(0, 4).SequenceEqual(new byte[] { 0x1A, 0x45, 0xDF, 0xA3 }),
+        "audio/wav" or "audio/x-wav" => audio.Length >= 44 && read >= 12 && header.AsSpan(0, 4).SequenceEqual("RIFF"u8) && header.AsSpan(8, 4).SequenceEqual("WAVE"u8),
+        "audio/mpeg" => audio.Length >= 128 && read >= 3 && (header.AsSpan(0, 3).SequenceEqual("ID3"u8) || (header[0] == 0xFF && (header[1] & 0xE0) == 0xE0)),
+        "audio/mp4" => audio.Length >= 24 && read >= 8 && header.AsSpan(4, 4).SequenceEqual("ftyp"u8),
+        "audio/ogg" => audio.Length >= 27 && read >= 4 && header.AsSpan(0, 4).SequenceEqual("OggS"u8),
         _ => false
     };
 }
+
+static bool IsValidLanguageHint(string? languageHint) =>
+    string.IsNullOrWhiteSpace(languageHint)
+    || languageHint.Length <= 35 && System.Text.RegularExpressions.Regex.IsMatch(
+        languageHint,
+        "^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+        TimeSpan.FromMilliseconds(50));
 
 static string CreateApprovedProtocolNarration(ProtocolResponse protocol)
 {
@@ -605,12 +713,55 @@ static string CreateApprovedProtocolNarration(ProtocolResponse protocol)
 static Dictionary<string, string[]> ValidateProfile(ProfileUpsertRequest request)
 {
     var errors = new Dictionary<string, string[]>();
+    var today = DateOnly.FromDateTime(DateTime.UtcNow);
+    var currentYear = today.Year;
     if (string.IsNullOrWhiteSpace(request.FullName) || request.FullName.Length > 160) errors["fullName"] = ["Full name is required and must be 160 characters or fewer."];
-    if (string.IsNullOrWhiteSpace(request.PreferredLanguage) || request.PreferredLanguage.Length > 12) errors["preferredLanguage"] = ["A valid preferred language is required."];
+    if (request.DateOfBirth is { } dateOfBirth && (dateOfBirth < new DateOnly(1900, 1, 1) || dateOfBirth > today)) errors["dateOfBirth"] = ["Date of birth must be between 1900-01-01 and today."];
+    var bloodGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-" };
+    if (!string.IsNullOrWhiteSpace(request.BloodGroup) && !bloodGroups.Contains(request.BloodGroup.Trim())) errors["bloodGroup"] = ["Blood group must use a supported ABO and Rh value."];
+    if (string.IsNullOrWhiteSpace(request.PreferredLanguage) || request.PreferredLanguage.Length > 12 || !IsValidLanguageHint(request.PreferredLanguage)) errors["preferredLanguage"] = ["A valid BCP-47 style preferred language of 12 characters or fewer is required."];
     if (request.ResponseMode is not ("text" or "audio" or "both")) errors["responseMode"] = ["Response mode must be text, audio, or both."];
-    if (request.Contacts.Count > 10) errors["contacts"] = ["No more than 10 emergency contacts are allowed."];
-    if (request.Contacts.Any(x => string.IsNullOrWhiteSpace(x.Name) || string.IsNullOrWhiteSpace(x.PhoneNumber))) errors["contacts"] = ["Every contact requires a name and phone number."];
+    if (request.InsuranceDetails?.Length > 1_000) errors["insuranceDetails"] = ["Insurance details must be 1,000 characters or fewer."];
+    if (request.DoctorContact?.Length > 300) errors["doctorContact"] = ["Doctor contact must be 300 characters or fewer."];
+
+    if (request.Contacts is null || request.Contacts.Count > 10
+        || request.Contacts.Any(contact => contact is null
+            || string.IsNullOrWhiteSpace(contact.Name) || contact.Name.Length > 160
+            || string.IsNullOrWhiteSpace(contact.Relationship) || contact.Relationship.Length > 80
+            || string.IsNullOrWhiteSpace(contact.PhoneNumber) || contact.PhoneNumber.Length > 40))
+        errors["contacts"] = ["Provide at most 10 contacts; each requires bounded name, relationship, and phone fields."];
+    else
+    {
+        var normalizedPhones = request.Contacts.Select(contact => string.Concat(contact.PhoneNumber.Where(char.IsAsciiDigit))).ToArray();
+        var displayPhonePattern = new System.Text.RegularExpressions.Regex(
+            @"^\+?[0-9() .-]+$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+            TimeSpan.FromMilliseconds(50));
+        if (request.Contacts.Select((contact, index) => normalizedPhones[index].Length is < 7 or > 15 || !displayPhonePattern.IsMatch(contact.PhoneNumber)).Any(invalid => invalid))
+            errors["contacts"] = ["Contact phone numbers must contain 7 to 15 ASCII digits; display spaces, parentheses, periods, hyphens, and a leading + are allowed."];
+        else if (normalizedPhones.Distinct(StringComparer.Ordinal).Count() != normalizedPhones.Length)
+            errors["contacts"] = ["Emergency contact phone numbers must be unique after normalization."];
+    }
+
+    ValidateNamedItems(request.Allergies, "allergies");
+    ValidateNamedItems(request.Conditions, "conditions");
+    ValidateNamedItems(request.Medications, "medications");
+    if (request.Procedures is null || request.Procedures.Count > 50
+        || request.Procedures.Any(procedure => procedure is null || string.IsNullOrWhiteSpace(procedure.Name) || procedure.Name.Length > 160
+            || procedure.Year is not null && (procedure.Year < 1900 || procedure.Year > currentYear)))
+        errors["procedures"] = ["Provide at most 50 procedures with bounded names and years from 1900 through the current year."];
+    if (request.PreferredHospital is not null
+        && (string.IsNullOrWhiteSpace(request.PreferredHospital.Name) || request.PreferredHospital.Name.Length > 160
+            || request.PreferredHospital.PhoneNumber?.Length > 40))
+        errors["preferredHospital"] = ["Preferred hospital requires a bounded name and optional phone number."];
+    if (request.Sharing is null) errors["sharing"] = ["Emergency sharing preferences are required."];
     return errors;
+
+    void ValidateNamedItems(IReadOnlyList<NamedMedicalInput>? items, string key)
+    {
+        if (items is null || items.Count > 50 || items.Any(item => item is null || string.IsNullOrWhiteSpace(item.Name) || item.Name.Length > 160))
+            errors[key] = [$"Provide at most 50 {key}; every name must contain 1 to 160 characters."];
+    }
 }
 
 static bool TryParseSummaryKind(string value, out SummaryKind kind)

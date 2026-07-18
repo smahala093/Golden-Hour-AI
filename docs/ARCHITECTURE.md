@@ -37,8 +37,9 @@ flowchart TB
     Application --> Infra
     Application --> Outbox
     Infra --> Db[(PostgreSQL)]
-    Infra -. "optional configuration" .-> AI["OpenAI Responses / speech"]
-    Infra -. "optional configuration" .-> Azure["Blob / Service Bus / Azure SignalR"]
+    Infra -. "configured real-provider mode" .-> AI["OpenAI Responses / speech"]
+    Infra -. "configured HTTPS + HMAC" .-> SMS["SMS gateway"]
+    Infra -. "provisioned; application adapters inactive" .-> Azure["Blob / Service Bus / Azure SignalR / telemetry"]
     Infra --> Mock["Deterministic mock providers"]
 ```
 
@@ -81,7 +82,7 @@ sequenceDiagram
       API->>Rules: Manual category + static fallback
     end
     Rules-->>API: Reviewed protocol version + bounded questions
-    API->>DB: Commit facts, provenance, uncertainty, tasks, outbox
+    API->>DB: Commit facts, provenance, uncertainty, tasks, AI-operation metadata
     API->>Hub: Publish committed session event
     Hub-->>Web: State changed
     Web->>API: Refetch authoritative session
@@ -105,8 +106,8 @@ flowchart LR
     Guard -- No --> Select["Deterministic protocol selection"]
     Confirm --> Select
     Fallback --> Select
-    Select --> Translate["Translate approved result; preserve names"]
-    Translate --> Present["One action + call option + provenance"]
+    Select --> Localize["Reviewed resource or labelled English fallback"]
+    Localize --> Present["One action + call option + provenance"]
     Present --> Persist["Timeline / handover with source labels"]
 ```
 
@@ -160,7 +161,7 @@ erDiagram
     EMERGENCY_PROFILE ||--o{ MEDICATION : reports
     EMERGENCY_PROFILE ||--o{ MEDICAL_PROCEDURE : reports
     EMERGENCY_PROFILE ||--o| PREFERRED_HOSPITAL : selects
-    EMERGENCY_PROFILE ||--o{ SHARING_PREFERENCE : controls
+    EMERGENCY_PROFILE ||--o| SHARING_PREFERENCE : controls
     APPLICATION_USER ||--o{ EMERGENCY_SESSION : owns
     EMERGENCY_SESSION ||--o{ EMERGENCY_PARTICIPANT : includes
     EMERGENCY_SESSION ||--o{ EMERGENCY_OBSERVATION : records
@@ -171,12 +172,9 @@ erDiagram
     EMERGENCY_SESSION ||--o{ EMERGENCY_SHARE_TOKEN : scopes
     APPLICATION_USER ||--o{ REFRESH_TOKEN : rotates
     EMERGENCY_SESSION ||--o{ AI_OPERATION : audits
-    EMERGENCY_SESSION ||--o{ NOTIFICATION_DELIVERY : reconciles
-    EMERGENCY_SESSION ||--o{ AUDIT_EVENT : audits
-    EMERGENCY_SESSION ||--o{ OUTBOX_MESSAGE : publishes
 ```
 
-Important storage properties include UTC timestamps, optimistic concurrency, explicit provenance, indexes on session/token hash/status/time, a unique idempotency constraint for critical commands, hashed refresh/share tokens, and minimal provider payload retention.
+`NOTIFICATION_DELIVERY`, `AUDIT_EVENT`, and `OUTBOX_MESSAGE` are intentionally omitted from session relationship edges: their current schema uses provider/message keys or generic resource/payload metadata rather than an `EmergencySession` foreign key. Important storage properties include UTC timestamps, optimistic concurrency, explicit provenance, indexes on session/token hash/status/time, a unique idempotency constraint for critical commands, hashed refresh/share tokens, and minimal provider payload retention.
 
 ## Production deployment
 
@@ -184,10 +182,12 @@ Important storage properties include UTC timestamps, optimistic concurrency, exp
 flowchart TB
     Internet((Internet)) --> ACA["Azure Container App\nPWA + API + SignalR endpoint"]
     ACA --> PG["PostgreSQL Flexible Server"]
-    ACA --> Blob["Private Blob Storage"]
-    ACA --> SB["Service Bus"]
-    ACA --> ASR["Azure SignalR Service"]
-    ACA --> AppI["Application Insights"]
+    ACA -. "adapter inactive" .-> Blob["Private Blob Storage"]
+    ACA -. "adapter inactive" .-> SB["Service Bus"]
+    ACA -. "delegation inactive" .-> ASR["Azure SignalR Service"]
+    ACA -. "exporter inactive" .-> AppI["Application Insights"]
+    ACA -. "optional configured provider" .-> OpenAI["OpenAI APIs"]
+    ACA -. "optional HTTPS + HMAC" .-> SMS["SMS gateway"]
     ACA --> KV["Key Vault / secret references"]
     ACR["Azure Container Registry"] --> ACA
     GH["GitHub Actions via OIDC"] --> ACR
@@ -201,7 +201,7 @@ flowchart TB
     ARM --> KV
 ```
 
-The first deployment intentionally uses one HTTPS origin for the PWA, API, cookies, and hub. Bicep definitions and the migration/health/smoke/rollback sequence are documented in [DEPLOYMENT.md](DEPLOYMENT.md).
+The first deployment intentionally uses one HTTPS origin for the PWA, API, cookies, and hub. PostgreSQL is active. OpenAI/speech and the HMAC SMS gateway are configurable application adapters. Blob Storage, Service Bus, Azure SignalR, and the Application Insights exporter are provisioned targets but remain inactive in application code. Bicep definitions and the migration/health/smoke/rollback sequence are documented in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Key architectural decisions
 
@@ -209,9 +209,9 @@ The first deployment intentionally uses one HTTPS origin for the PWA, API, cooki
 2. **Static protocol authority:** AI can select or simplify only versioned, reviewed content; clinical actions never originate in a prompt response.
 3. **Server-authoritative realtime:** commit first, notify second, refetch on reconnect. This makes duplicate and out-of-order client messages recoverable.
 4. **Same-origin browser security:** the API serves the production PWA so Secure/HttpOnly cookies and SignalR do not require a cross-origin token design.
-5. **Mock-first integrations:** a deterministic demo works without external keys; each production adapter has explicit configured/degraded/unavailable health.
+5. **Mock-first integrations:** a deterministic demo works without external keys. Real-provider mode currently couples OpenAI/speech with the bounded HMAC SMS adapter. Database readiness is implemented; provider-specific health/delivery evidence is still required before claiming either external integration operational.
 6. **PWA before native:** the installable web experience is primary. Capacitor adds packaging, not a separate clinical or state implementation.
 
 ## Scalability and recovery limits
 
-The prototype can scale API replicas when SignalR is delegated to Azure SignalR and transactions remain in PostgreSQL. Outbox consumers must be idempotent. Production readiness still requires measured load limits, database point-in-time restore exercises, multi-region requirements, retention rules, alert thresholds, queue poison-message handling, and a documented recovery-time/recovery-point objective. None is claimed by the checked-in prototype alone.
+The checked-in deployment is deliberately restricted to one API replica because SignalR remains in-process and the event bus/file-storage/cloud telemetry adapters are inactive. Durable state is committed before realtime notification; only selected external events currently receive outbox records, and the dispatcher has no distributed lease. It can scale replicas only after SignalR is delegated to Azure SignalR, a real event bus and idempotent outbox consumers/distributed leasing are implemented, and shared state remains in PostgreSQL. Production readiness still requires measured load limits, database point-in-time restore exercises, multi-region requirements, retention rules, alert thresholds, queue poison-message handling, and a documented recovery-time/recovery-point objective. None is claimed by the checked-in prototype alone.

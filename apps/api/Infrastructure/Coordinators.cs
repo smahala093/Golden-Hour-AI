@@ -20,6 +20,11 @@ public sealed class ProfileCoordinator(GoldenHourDbContext dbContext, IClock clo
     public async Task<ProfileResponse> UpsertAsync(Guid ownerId, ProfileUpsertRequest request, CancellationToken cancellationToken)
     {
         var profile = await Query().SingleOrDefaultAsync(x => x.OwnerId == ownerId, cancellationToken);
+        var isNewProfile = profile is null;
+        var verifiedPhoneNumbers = profile?.Contacts
+            .Where(contact => contact.IsVerified)
+            .Select(contact => NormalizePhoneNumber(contact.PhoneNumber))
+            .ToHashSet(StringComparer.Ordinal) ?? [];
         if (profile is null)
         {
             profile = new EmergencyProfile { OwnerId = ownerId };
@@ -53,7 +58,8 @@ public sealed class ProfileCoordinator(GoldenHourDbContext dbContext, IClock clo
             Name = x.Name.Trim(),
             Relationship = x.Relationship.Trim(),
             PhoneNumber = x.PhoneNumber.Trim(),
-            IsVerified = x.IsVerified
+            // Verification is server-owned. A profile payload cannot promote its own contact.
+            IsVerified = verifiedPhoneNumbers.Contains(NormalizePhoneNumber(x.PhoneNumber))
         }).ToList();
         profile.Allergies = request.Allergies.Select(x => new Allergy { EmergencyProfileId = profile.Id, Name = x.Name.Trim() }).ToList();
         profile.Conditions = request.Conditions.Select(x => new MedicalCondition { EmergencyProfileId = profile.Id, Name = x.Name.Trim() }).ToList();
@@ -76,9 +82,19 @@ public sealed class ProfileCoordinator(GoldenHourDbContext dbContext, IClock clo
             ShareEmergencyContact = request.Sharing.ShareEmergencyContact,
             ReviewedAtUtc = request.Sharing.Reviewed ? clock.UtcNow : null
         };
+        dbContext.AuditEvents.Add(new AuditEvent
+        {
+            ActorUserId = ownerId,
+            Action = isNewProfile ? "emergency-profile-created" : "emergency-profile-updated",
+            ResourceType = "EmergencyProfile",
+            ResourceId = profile.Id.ToString()
+        });
         await dbContext.SaveChangesAsync(cancellationToken);
         return ToResponse(profile);
     }
+
+    private static string NormalizePhoneNumber(string value) =>
+        string.Concat(value.Where(char.IsAsciiDigit));
 
     public async Task<ReadinessResult> ReadinessAsync(Guid ownerId, CancellationToken cancellationToken)
     {
@@ -113,8 +129,8 @@ public sealed class SessionCoordinator(
     IRealtimeNotifier realtime,
     IClock clock,
     IOptions<EmergencyOptions> emergencyOptions,
-    IOptions<AuthenticationOptions> authenticationOptions,
-    IValidator<IncidentExtraction> extractionValidator)
+    IValidator<IncidentExtraction> extractionValidator,
+    ILogger<SessionCoordinator> logger)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -124,6 +140,10 @@ public sealed class SessionCoordinator(
         if (string.IsNullOrWhiteSpace(request.CountryCode) || request.CountryCode.Length != 2 || !request.CountryCode.All(char.IsAsciiLetter))
             throw new InvalidDataException("Country code must contain two letters.");
         if (request.TypedLocation?.Length > 300) throw new InvalidDataException("Typed location must be 300 characters or fewer.");
+        if (request.UseOwnerProfileForPatient && ownerId is null)
+            throw new UnauthorizedAccessException("Authentication is required to use a stored emergency profile.");
+        if (request.UseOwnerProfileForPatient && request.PatientRelationship is not (PatientRelationship.Self or PatientRelationship.Family))
+            throw new InvalidDataException("A stored owner profile may be selected only for self or family-patient sessions.");
         var createKeyHash = SHA256.HashData(Encoding.UTF8.GetBytes($"{ownerId?.ToString("N") ?? "anonymous"}:{idempotencyKey}"));
         var requestHash = HashCreateRequest(request);
         var existing = await Query().SingleOrDefaultAsync(
@@ -132,13 +152,15 @@ public sealed class SessionCoordinator(
         {
             if (existing.CreateRequestHash is null || !CryptographicOperations.FixedTimeEquals(existing.CreateRequestHash, requestHash))
                 throw new InvalidOperationException("The idempotency key was already used for a different session request.");
-            return Map(existing) with
-            {
-                AnonymousAccessToken = ownerId is null ? DeriveAnonymousAccessToken(existing.Id, idempotencyKey) : null
-            };
+            if (ownerId is null)
+                throw new InvalidOperationException("The anonymous access grant is returned only once and cannot be replayed; start a new session with a new Idempotency-Key after an indeterminate response.");
+            return Map(existing);
         }
         EmergencyProfile? profile = null;
-        if (ownerId is not null && request.PatientRelationship == PatientRelationship.Self)
+        var shouldSnapshotOwnerProfile = ownerId is not null
+            && (request.PatientRelationship == PatientRelationship.Self
+                || request.PatientRelationship == PatientRelationship.Family && request.UseOwnerProfileForPatient);
+        if (shouldSnapshotOwnerProfile)
         {
             profile = await dbContext.EmergencyProfiles.Include(x => x.Allergies).Include(x => x.Conditions)
                 .Include(x => x.Medications).Include(x => x.Procedures).Include(x => x.Contacts)
@@ -189,7 +211,7 @@ public sealed class SessionCoordinator(
         string? anonymousAccessToken = null;
         if (ownerId is null)
         {
-            anonymousAccessToken = DeriveAnonymousAccessToken(session.Id, idempotencyKey);
+            anonymousAccessToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
             dbContext.EmergencyShareTokens.Add(new EmergencyShareToken
             {
                 EmergencySessionId = session.Id,
@@ -208,6 +230,11 @@ public sealed class SessionCoordinator(
     {
         var session = await LoadAuthorizedAsync(sessionId, userId, anonymousAccessToken, cancellationToken);
         return Map(session);
+    }
+
+    public async Task EnsureAuthorizedAsync(Guid sessionId, Guid? userId, string? anonymousAccessToken, CancellationToken cancellationToken)
+    {
+        _ = await LoadAuthorizedAsync(sessionId, userId, anonymousAccessToken, cancellationToken);
     }
 
     public async Task<IReadOnlyList<SessionResponse>> ListAsync(Guid userId, int limit, DateTime? beforeUtc, CancellationToken cancellationToken)
@@ -234,9 +261,13 @@ public sealed class SessionCoordinator(
             interpretation = new IncidentInterpretation(
                 new IncidentExtraction(
                     request.SelectedLanguage ?? "und", 0, category, session.PatientRelationship,
-                    ["The user chose manual category-based guidance."], null,
+                    [], null,
                     TernaryAnswer.Unknown, TernaryAnswer.Unknown, TernaryAnswer.Unknown, null,
-                    UrgencyClassification.Unknown, [], [request.OriginalText],
+                    UrgencyClassification.Unknown, [
+                        new CriticalMissingQuestion("conscious", "Is the person conscious?", CriticalAnswerType.YesNo),
+                        new CriticalMissingQuestion("breathing", "Is the person breathing normally?", CriticalAnswerType.YesNo),
+                        new CriticalMissingQuestion("heavy-bleeding", "Is heavy bleeding visible?", CriticalAnswerType.YesNo)
+                    ], ["AI was skipped; use the preserved original description and confirmed answers."],
                     ["AI interpretation was skipped by the user."], 0),
                 true, true, "ai_skipped");
         }
@@ -260,7 +291,8 @@ public sealed class SessionCoordinator(
         session.ProtocolId = protocol.Id;
         session.ProtocolVersion = protocol.Version;
         session.AiConfidence = interpretation.Extraction.Confidence;
-        session.InterpretationConfirmed = !interpretation.IsUncertain;
+        // Extracted facts remain unconfirmed until the user explicitly confirms them.
+        session.InterpretationConfirmed = false;
 
         foreach (var fact in interpretation.Extraction.Observations)
         {
@@ -274,14 +306,50 @@ public sealed class SessionCoordinator(
             });
         }
 
-        IReadOnlyList<string> suggestions;
-        try
+        IReadOnlyList<string> suggestions = ["call-emergency-services", "stay-with-patient"];
+        AiCallMetadata? suggestionMetadata = null;
+        var suggestionSucceeded = false;
+        string? suggestionFailureCode = null;
+        if (!request.SkipAi)
         {
-            suggestions = await aiProvider.SuggestCoordinationTaskCodesAsync(interpretation.Extraction, cancellationToken);
-        }
-        catch
-        {
-            suggestions = ["call-emergency-services", "stay-with-patient"];
+            try
+            {
+                var suggestionResult = await aiProvider.SuggestCoordinationTaskCodesAsync(interpretation.Extraction, cancellationToken);
+                suggestions = suggestionResult.Value;
+                suggestionMetadata = suggestionResult.Metadata;
+                suggestionSucceeded = true;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                suggestionFailureCode = "ai_timeout";
+                logger.LogWarning("AI coordination task suggestion timed out; using the reviewed static task set.");
+                suggestions = ["call-emergency-services", "stay-with-patient"];
+            }
+            catch (AiProviderException exception)
+            {
+                suggestionMetadata = exception.Metadata;
+                suggestionFailureCode = exception.Code switch
+                {
+                    "refusal" => "ai_refusal",
+                    "rate_limited" => "ai_rate_limited",
+                    "incomplete_output" => "ai_incomplete_output",
+                    "malformed_output" or "empty_output" => "ai_malformed_output",
+                    "timeout" => "ai_timeout",
+                    _ => "ai_unavailable"
+                };
+                logger.LogWarning("AI coordination task suggestion failed with safe code {FailureCode}; using the reviewed static task set.", suggestionFailureCode);
+                suggestions = ["call-emergency-services", "stay-with-patient"];
+            }
+            catch (Exception exception)
+            {
+                suggestionFailureCode = "ai_unavailable";
+                logger.LogWarning("AI coordination task suggestion was unavailable ({ExceptionType}); using the reviewed static task set.", exception.GetType().Name);
+                suggestions = ["call-emergency-services", "stay-with-patient"];
+            }
         }
 
         foreach (var allowed in TaskCatalogue.ValidateSuggestions(suggestions.Concat(["call-emergency-services"])))
@@ -302,15 +370,37 @@ public sealed class SessionCoordinator(
         AddTimeline(session, incidentEventType,
             request.SkipAi ? "The user skipped AI interpretation; category-based static guidance was selected." : interpretation.IsUncertain ? "Reported facts need user confirmation; static guidance remains available." : "Reported facts were extracted for user review.",
             incidentTimelineKey, userId);
+        var aiMetadata = interpretation.AiMetadata ?? (request.SkipAi
+            ? new AiCallMetadata("incident_extraction", "none-user-skipped", "none", 0, null, null)
+            : new AiCallMetadata("incident_extraction", "unknown", "unknown", 0, null, null));
         dbContext.AiOperations.Add(new AiOperation
         {
             EmergencySessionId = session.Id,
-            OperationType = "incident-extraction",
-            Provider = aiProvider.GetType().Name,
-            Model = aiProvider is MockAiProvider ? "deterministic-mock" : "configured-openai-model",
+            OperationType = aiMetadata.OperationType,
+            Provider = aiMetadata.Provider,
+            Model = aiMetadata.Model,
+            LatencyMilliseconds = aiMetadata.LatencyMilliseconds,
+            InputTokens = aiMetadata.InputTokens,
+            OutputTokens = aiMetadata.OutputTokens,
             Succeeded = !interpretation.UsedStaticFallback && !request.SkipAi,
             FailureCode = interpretation.FailureCode
         });
+        if (!request.SkipAi)
+        {
+            suggestionMetadata ??= new AiCallMetadata("coordination_task_suggestion", "unknown", "unknown", 0, null, null);
+            dbContext.AiOperations.Add(new AiOperation
+            {
+                EmergencySessionId = session.Id,
+                OperationType = suggestionMetadata.OperationType,
+                Provider = suggestionMetadata.Provider,
+                Model = suggestionMetadata.Model,
+                LatencyMilliseconds = suggestionMetadata.LatencyMilliseconds,
+                InputTokens = suggestionMetadata.InputTokens,
+                OutputTokens = suggestionMetadata.OutputTokens,
+                Succeeded = suggestionSucceeded,
+                FailureCode = suggestionFailureCode
+            });
+        }
         try
         {
             await dbContext.SaveChangesAsync(cancellationToken);
@@ -399,6 +489,11 @@ public sealed class SessionCoordinator(
                     updated = updated with { ReportedSymptomStartTime = rawAnswer.Trim() };
                     AddConfirmedObservation("reported-symptom-start-time", rawAnswer.Trim());
                     break;
+                case "confirm-facts":
+                    var confirmation = ParseTernary(answer);
+                    session.InterpretationConfirmed = confirmation == TernaryAnswer.Yes;
+                    AddConfirmedObservation("reported-facts-confirmation", answer);
+                    break;
                 default:
                     throw new InvalidDataException("Critical question ID is not allowlisted.");
             }
@@ -406,6 +501,12 @@ public sealed class SessionCoordinator(
             AddTimeline(session, "critical-answer", $"The user confirmed {questionId.Replace('-', ' ')} as {rawAnswer.Trim()}.", timelineKey, userId);
         }
 
+        updated = updated with
+        {
+            CriticalMissingQuestions = updated.CriticalMissingQuestions
+                .Where(question => !answers.ContainsKey(question.Id))
+                .ToArray()
+        };
         var validation = await extractionValidator.ValidateAsync(updated, cancellationToken);
         if (!validation.IsValid) throw new InvalidDataException("Critical answers did not produce valid incident facts.");
         var protocol = protocolCatalogue.Select(updated, session.SelectedCategory);
@@ -460,12 +561,15 @@ public sealed class SessionCoordinator(
         return Map(session);
     }
 
-    public async Task<SessionResponse> AddTaskAsync(Guid sessionId, Guid userId, CreateTaskRequest request, CancellationToken cancellationToken)
+    public async Task<SessionResponse> AddTaskAsync(Guid sessionId, Guid userId, CreateTaskRequest request, string idempotencyKey, CancellationToken cancellationToken)
     {
         var session = await LoadAuthorizedAsync(sessionId, userId, null, cancellationToken);
         var actor = session.Participants.Single(x => x.UserId == userId);
         var isCoordinator = actor.Role is ParticipantRole.Owner or ParticipantRole.Caregiver;
         if (!isCoordinator) throw new UnauthorizedAccessException("Only the session owner or a caregiver can assign tasks.");
+        ValidateCommandKey(idempotencyKey);
+        var timelineKey = $"task-command:{idempotencyKey}";
+        if (session.Timeline.Any(entry => entry.IdempotencyKey == timelineKey)) return Map(session);
         if (request.AssignedParticipantId is not null && session.Participants.All(x => x.Id != request.AssignedParticipantId))
             throw new InvalidDataException("The task assignee must belong to this emergency session.");
         var allowed = TaskCatalogue.Get(request.TaskCode);
@@ -479,16 +583,16 @@ public sealed class SessionCoordinator(
                 Status = request.AssignedParticipantId is null ? Domain.TaskStatus.Suggested : Domain.TaskStatus.Assigned
             };
             session.Tasks.Add(task);
-            AddTimeline(session, "task-assigned", $"Coordination task assigned: {allowed.Title}", $"task-created:{task.Id}", userId);
-            await dbContext.SaveChangesAsync(cancellationToken);
+            AddTimeline(session, "task-assigned", $"Coordination task assigned: {allowed.Title}", timelineKey, userId);
         }
         else if (request.AssignedParticipantId is not null && task.AssignedParticipantId != request.AssignedParticipantId)
         {
             task.AssignedParticipantId = request.AssignedParticipantId;
             task.Status = Domain.TaskStatus.Assigned;
-            AddTimeline(session, "task-assigned", $"Coordination task assigned: {allowed.Title}", $"task-assigned:{task.Id}:{task.ConcurrencyToken:N}", userId);
-            await dbContext.SaveChangesAsync(cancellationToken);
+            AddTimeline(session, "task-assigned", $"Coordination task assigned: {allowed.Title}", timelineKey, userId);
         }
+        else AddTimeline(session, "task-assignment-unchanged", $"Coordination task already present: {allowed.Title}", timelineKey, userId);
+        await dbContext.SaveChangesAsync(cancellationToken);
         await realtime.NotifySessionAsync(session.Id, "TaskUpdated", Map(task), cancellationToken);
         return Map(session);
     }
@@ -507,14 +611,15 @@ public sealed class SessionCoordinator(
         if (request.Status is Domain.TaskStatus.Accepted or Domain.TaskStatus.Declined or Domain.TaskStatus.Completed
             && !isCoordinator && task.AssignedParticipantId != actor.Id)
             throw new UnauthorizedAccessException("Only the assignee or a session coordinator can change this task status.");
+        if (task.Status == Domain.TaskStatus.Completed && request.Status == Domain.TaskStatus.Completed
+            && (request.AssignedParticipantId is null || request.AssignedParticipantId == task.AssignedParticipantId)) return Map(session);
         if (task.ConcurrencyToken != request.ConcurrencyToken) throw new DbUpdateConcurrencyException("The task was updated by another participant.");
-        if (task.Status == Domain.TaskStatus.Completed && request.Status == Domain.TaskStatus.Completed) return Map(session);
         if (!CanTransitionTask(task.Status, request.Status)) throw new InvalidOperationException("The requested task status transition is not allowed.");
         task.Status = request.Status;
         task.AssignedParticipantId = request.AssignedParticipantId ?? task.AssignedParticipantId;
         if (request.Status == Domain.TaskStatus.Accepted) task.AcceptedAtUtc = clock.UtcNow;
         if (request.Status == Domain.TaskStatus.Completed) task.CompletedAtUtc = clock.UtcNow;
-        AddTimeline(session, $"task-{request.Status.ToString().ToLowerInvariant()}", $"Coordination task {request.Status.ToString().ToLowerInvariant()}: {task.Title}", $"task:{task.Id}:{request.Status}", userId);
+        AddTimeline(session, $"task-{request.Status.ToString().ToLowerInvariant()}", $"Coordination task {request.Status.ToString().ToLowerInvariant()}: {task.Title}", $"task:{task.Id}:{request.ConcurrencyToken:N}:{request.Status}", userId);
         await dbContext.SaveChangesAsync(cancellationToken);
         await realtime.NotifySessionAsync(session.Id, "TaskUpdated", Map(task), cancellationToken);
         return Map(session);
@@ -535,7 +640,7 @@ public sealed class SessionCoordinator(
         if (kind == SummaryKind.Responder)
         {
             AppendPermittedProfile(lines, snapshot);
-            lines.Add($"Emergency location [user-shared]: {FormatLocation(session.Locations.LastOrDefault())}");
+            lines.Add($"Emergency location [user-shared]: {FormatLocation(session.Locations.OrderByDescending(x => x.CreatedAtUtc).FirstOrDefault())}");
             lines.Add($"Reported observations [user/AI-extracted, unconfirmed unless labelled]: {JoinOrUnknown(session.Observations.Where(x => !x.IsConfirmed).Select(x => x.Value).Concat(facts?.Observations ?? []))}");
             lines.Add($"Consciousness [reported fact]: {facts?.IsConscious.ToString() ?? "Unknown"}");
             lines.Add($"Breathing status [reported fact]: {facts?.IsBreathingNormally.ToString() ?? "Unknown"}");
@@ -545,13 +650,13 @@ public sealed class SessionCoordinator(
         else if (kind == SummaryKind.HospitalHandover)
         {
             lines.Add("Chronological timeline:");
-            lines.AddRange(session.Timeline.OrderBy(x => x.Sequence).Select(x => $"- {x.CreatedAtUtc:O} [family/user-reported action: {x.Type}] {x.Message}"));
+            lines.AddRange(session.Timeline.OrderBy(x => x.Sequence).Select(x => $"- {x.CreatedAtUtc:O} [{TimelineSource(x)}: {x.Type}] {x.Message}"));
             lines.Add($"Original description [user-reported, unconfirmed]: {session.OriginalInput ?? "not provided"}");
             lines.Add($"Confirmed observations [user-confirmed]: {JoinOrUnknown(session.Observations.Where(x => x.IsConfirmed).Select(x => $"{x.Kind}: {x.Value}"))}");
             lines.Add($"Unconfirmed observations [AI-extracted/user-reported]: {JoinOrUnknown(session.Observations.Where(x => !x.IsConfirmed).Select(x => x.Value).Concat(facts?.Observations ?? []))}");
             AppendPermittedProfile(lines, snapshot);
             lines.Add($"Protocol version [reviewed static protocol]: {session.ProtocolId ?? "not selected"} {session.ProtocolVersion ?? ""}");
-            lines.Add($"Languages used: original={session.OriginalLanguage ?? "unknown"}; summary={session.OriginalLanguage ?? "en"}");
+            lines.Add($"Languages used: original={session.OriginalLanguage ?? "unknown"}; summary=en");
             lines.Add($"Missing or uncertain information: {JoinOrUnknown(facts?.Uncertainties ?? ["Incident interpretation is not confirmed."])}");
             lines.Add($"AI confidence (not a diagnosis): {(session.AiConfidence is null ? "not available" : session.AiConfidence.Value.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture))}");
         }
@@ -568,7 +673,7 @@ public sealed class SessionCoordinator(
             EmergencySessionId = session.Id,
             Kind = kind,
             Content = string.Join('\n', lines),
-            Language = session.OriginalLanguage ?? "en",
+            Language = "en",
             ProtocolVersion = session.ProtocolVersion ?? "none"
         };
         dbContext.EmergencySummaries.Add(summary);
@@ -603,7 +708,7 @@ public sealed class SessionCoordinator(
             output.Add($"Critical allergies [profile snapshot]: {(profile.Sharing.ShareAllergies ? JoinOrUnknown(profile.Allergies) : "not shared")}");
             output.Add($"Relevant conditions [profile snapshot]: {(profile.Sharing.ShareConditions ? JoinOrUnknown(profile.Conditions) : "not shared")}");
             output.Add($"Current medicines [profile snapshot, no dosage advice]: {(profile.Sharing.ShareMedications ? JoinOrUnknown(profile.Medications) : "not shared")}");
-            output.Add("Previous procedures [profile snapshot]: not shared (no explicit procedure-sharing permission exists)");
+            output.Add($"Previous procedures [profile snapshot]: {(profile.Sharing.ShareConditions ? JoinOrUnknown(profile.Procedures.Select(procedure => procedure.Year is null ? procedure.Name : $"{procedure.Name} ({procedure.Year})")) : "not shared")}");
             output.Add($"Emergency contact [profile snapshot]: {(profile.Sharing.ShareEmergencyContact && profile.EmergencyContact is not null ? $"{profile.EmergencyContact.Name}, {profile.EmergencyContact.Relationship}, {profile.EmergencyContact.PhoneNumber}" : "not shared")}");
         }
     }
@@ -612,15 +717,13 @@ public sealed class SessionCoordinator(
     {
         var session = await LoadAuthorizedAsync(sessionId, userId, null, cancellationToken);
         if (session.OwnerId != userId) throw new UnauthorizedAccessException("Only the session owner can close the session.");
+        if (session.Status == SessionStatus.Closed) return Map(session);
         if (session.ConcurrencyToken != concurrencyToken) throw new DbUpdateConcurrencyException("The session was updated by another participant.");
-        if (session.Status != SessionStatus.Closed)
-        {
-            if (!SessionTransitions.CanTransition(session.Status, SessionStatus.Closed)) throw new InvalidOperationException("Session cannot be closed from its current status.");
-            session.Status = SessionStatus.Closed;
-            AddTimeline(session, "session-closed", "Emergency coordination session closed by its owner.", $"session-closed:{session.Id}", userId);
-            await dbContext.SaveChangesAsync(cancellationToken);
-            await realtime.NotifySessionAsync(session.Id, "SessionUpdated", new { session.Id, session.Status }, cancellationToken);
-        }
+        if (!SessionTransitions.CanTransition(session.Status, SessionStatus.Closed)) throw new InvalidOperationException("Session cannot be closed from its current status.");
+        session.Status = SessionStatus.Closed;
+        AddTimeline(session, "session-closed", "Emergency coordination session closed by its owner.", $"session-closed:{session.Id}", userId);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await realtime.NotifySessionAsync(session.Id, "SessionUpdated", new { session.Id, session.Status }, cancellationToken);
         return Map(session);
     }
 
@@ -679,7 +782,15 @@ public sealed class SessionCoordinator(
 
     internal static ProtocolResponse Map(ProtocolDefinition x) => new(x.Id, x.Version, x.ReviewStatus, x.Notice, x.EmergencyCallInstruction, x.DoActions, x.DoNotActions, x.EscalationRule);
     internal static TaskResponse Map(EmergencyTask x) => new(x.Id, x.TaskCode, x.Title, x.IsCritical, x.Status, x.AssignedParticipantId, x.AcceptedAtUtc, x.CompletedAtUtc, x.ConcurrencyToken);
-    internal static TimelineEventResponse Map(EmergencyTimelineEvent x) => new(x.Id, x.Sequence, x.Type, x.Message, x.CreatedAtUtc);
+    internal static TimelineEventResponse Map(EmergencyTimelineEvent x) => new(x.Id, x.Sequence, x.Type, x.Message, TimelineSource(x), x.CreatedAtUtc);
+
+    private static string TimelineSource(EmergencyTimelineEvent entry)
+    {
+        if (entry.Type == "critical-answer" || entry.Type == "call-connected") return "confirmed";
+        if (entry.Type == "incident-understood") return "ai-extracted";
+        if (entry.Type.StartsWith("bystander-", StringComparison.Ordinal)) return "user-reported";
+        return entry.ActorUserId is null ? "system" : "user-reported";
+    }
 
     private static EmergencyTimelineEvent AddTimeline(EmergencySession session, string type, string message, string idempotencyKey, Guid? actorUserId)
     {
@@ -708,15 +819,8 @@ public sealed class SessionCoordinator(
 
     private static byte[] HashCreateRequest(CreateSessionRequest request)
     {
-        var canonical = $"{request.PatientRelationship}|{request.SelectedCategory}|{request.TypedLocation?.Trim() ?? string.Empty}|{request.CountryCode.Trim().ToUpperInvariant()}";
+        var canonical = $"{request.PatientRelationship}|{request.SelectedCategory}|{request.TypedLocation?.Trim() ?? string.Empty}|{request.CountryCode.Trim().ToUpperInvariant()}|{request.UseOwnerProfileForPatient}";
         return SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
-    }
-
-    private string DeriveAnonymousAccessToken(Guid sessionId, string idempotencyKey)
-    {
-        var key = Encoding.UTF8.GetBytes(authenticationOptions.Value.Jwt.SigningKey);
-        var payload = Encoding.UTF8.GetBytes($"anonymous-session:{sessionId:N}:{idempotencyKey}");
-        return Convert.ToBase64String(HMACSHA256.HashData(key, payload)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
     }
 
     private static bool CanTransitionTask(Domain.TaskStatus current, Domain.TaskStatus next) => (current, next) switch
@@ -761,7 +865,7 @@ public sealed class SessionCoordinator(
         snapshot.Sharing.ShareAllergies ? snapshot.Allergies : [],
         snapshot.Sharing.ShareConditions ? snapshot.Conditions : [],
         snapshot.Sharing.ShareMedications ? snapshot.Medications : [],
-        [],
+        snapshot.Sharing.ShareConditions ? snapshot.Procedures : [],
         snapshot.Sharing.ShareEmergencyContact ? snapshot.EmergencyContact : null,
         snapshot.CapturedAtUtc);
 
@@ -803,21 +907,36 @@ public sealed class ShareTokenCoordinator(
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public async Task<ShareTokenResponse> CreateAsync(Guid sessionId, Guid ownerId, int lifetimeMinutes, CancellationToken cancellationToken)
+    public async Task<ShareTokenResponse> CreateAsync(Guid sessionId, Guid ownerId, int lifetimeMinutes, string idempotencyKey, CancellationToken cancellationToken)
     {
-        var session = await dbContext.EmergencySessions.SingleOrDefaultAsync(x => x.Id == sessionId, cancellationToken)
+        if (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length is < 16 or > 80)
+            throw new InvalidDataException("An Idempotency-Key header containing 16 to 80 characters is required.");
+        var session = await dbContext.EmergencySessions.Include(x => x.Timeline).SingleOrDefaultAsync(x => x.Id == sessionId, cancellationToken)
             ?? throw new KeyNotFoundException("Emergency session not found.");
         if (session.OwnerId != ownerId) throw new UnauthorizedAccessException("Only the session owner can create a share link.");
+        var commandKey = $"share-token:{idempotencyKey}";
+        if (session.Timeline.Any(entry => entry.IdempotencyKey == commandKey))
+            throw new InvalidOperationException("The share-token response contains a one-time secret and cannot be replayed; use a new Idempotency-Key after an indeterminate response.");
         var lifetime = Math.Clamp(lifetimeMinutes, 5, 120);
         var raw = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var tokenHash = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
         var entity = new EmergencyShareToken
         {
             EmergencySessionId = sessionId,
             Purpose = ShareTokenPurpose.BystanderView,
-            TokenHash = SHA256.HashData(Encoding.UTF8.GetBytes(raw)),
+            TokenHash = tokenHash,
             ExpiresAtUtc = clock.UtcNow.AddMinutes(lifetime)
         };
         dbContext.EmergencyShareTokens.Add(entity);
+        session.Timeline.Add(new EmergencyTimelineEvent
+        {
+            EmergencySessionId = sessionId,
+            Sequence = session.Timeline.Count == 0 ? 1 : session.Timeline.Max(entry => entry.Sequence) + 1,
+            Type = "share-token-created",
+            Message = "A time-limited emergency share link was created.",
+            IdempotencyKey = commandKey,
+            ActorUserId = ownerId
+        });
         dbContext.AuditEvents.Add(new AuditEvent { ActorUserId = ownerId, Action = "share-token-created", ResourceType = "EmergencySession", ResourceId = sessionId.ToString() });
         await dbContext.SaveChangesAsync(cancellationToken);
         return new ShareTokenResponse(entity.Id, raw, entity.ExpiresAtUtc, $"/share#{raw}");
@@ -958,7 +1077,7 @@ public sealed class ShareTokenCoordinator(
         static string[] Names(JsonElement rootElement, string property) => rootElement.TryGetProperty(property, out var values)
             ? values.EnumerateArray().Select(x => x.GetString()).Where(x => x is not null).Cast<string>().ToArray() : [];
         EmergencyContact? contact = null;
-        if (Shared("shareEmergencyContact") && root.TryGetProperty("contact", out var contactElement) && contactElement.ValueKind == JsonValueKind.Object)
+        if (Shared("shareEmergencyContact") && root.TryGetProperty("emergencyContact", out var contactElement) && contactElement.ValueKind == JsonValueKind.Object)
         {
             contact = new EmergencyContact
             {

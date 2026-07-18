@@ -74,6 +74,7 @@ public sealed class ProtocolCatalogue
                 IncidentCategory.Seizure => "seizure",
                 IncidentCategory.AllergicReaction => "suspected-allergic-reaction",
                 IncidentCategory.ChestPain => "chest-pain",
+                IncidentCategory.HeavyBleeding => "heavy-external-bleeding",
                 IncidentCategory.FallOrInjury or IncidentCategory.RoadAccident => "fall-or-injury",
                 _ => "unknown-emergency"
             }

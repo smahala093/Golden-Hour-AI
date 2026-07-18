@@ -2,6 +2,8 @@
 
 The installable PWA/web URL is the primary Golden Hour AI deliverable. Capacitor is an optional shell around the same built React app; it does not introduce a separate emergency, clinical, authentication, or offline implementation.
 
+No native Android project is checked in. The commands/workflows below generate one from `apps/web/dist` when JDK/Android tooling is available. The current Capacitor origin (`https://localhost`) has not been wired and device-tested against a deployed same-origin API/cookie-auth topology, so a generated package must not be described as a functional production client on the strength of packaging alone. No APK or AAB was produced during the recorded local verification.
+
 - Application ID: `ai.goldenhour.app`
 - App name: `Golden Hour AI`
 - Web source: `apps/web/dist`

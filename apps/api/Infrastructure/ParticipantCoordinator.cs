@@ -11,8 +11,10 @@ public sealed class ParticipantCoordinator(
     IClock clock,
     IRealtimeNotifier realtime)
 {
-    public async Task<ParticipantInviteResponse> InviteAsync(Guid sessionId, Guid ownerId, InviteParticipantRequest request, CancellationToken cancellationToken)
+    public async Task<ParticipantInviteResponse> InviteAsync(Guid sessionId, Guid ownerId, InviteParticipantRequest request, string idempotencyKey, CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length is < 16 or > 80)
+            throw new InvalidDataException("An Idempotency-Key header containing 16 to 80 characters is required.");
         var session = await dbContext.EmergencySessions.Include(x => x.Participants).Include(x => x.Timeline)
             .SingleOrDefaultAsync(x => x.Id == sessionId, cancellationToken)
             ?? throw new KeyNotFoundException("Emergency session not found.");
@@ -20,6 +22,11 @@ public sealed class ParticipantCoordinator(
         if (session.Status == SessionStatus.Closed) throw new InvalidOperationException("Closed sessions cannot invite participants.");
         if (string.IsNullOrWhiteSpace(request.DisplayName) || request.DisplayName.Length > 100) throw new InvalidDataException("Participant display name is invalid.");
         if (request.Role == ParticipantRole.Owner) throw new InvalidDataException("Owner invitations are not permitted.");
+        var commandKey = $"participant-invite:{idempotencyKey}";
+        if (session.Timeline.Any(entry => entry.IdempotencyKey == commandKey))
+            throw new InvalidOperationException("The participant invitation contains a one-time secret and cannot be replayed; use a new Idempotency-Key after an indeterminate response.");
+        var raw = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var tokenHash = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
         if (session.Participants.Count >= 20) throw new InvalidOperationException("Participant limit reached.");
 
         var participant = new EmergencyParticipant
@@ -28,7 +35,6 @@ public sealed class ParticipantCoordinator(
             DisplayName = request.DisplayName.Trim(),
             Role = request.Role
         };
-        var raw = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
         var expires = clock.UtcNow.AddMinutes(Math.Clamp(request.LifetimeMinutes, 5, 120));
         dbContext.EmergencyParticipants.Add(participant);
         dbContext.EmergencyShareTokens.Add(new EmergencyShareToken
@@ -36,8 +42,17 @@ public sealed class ParticipantCoordinator(
             EmergencySessionId = sessionId,
             EmergencyParticipantId = participant.Id,
             Purpose = ShareTokenPurpose.ParticipantInvite,
-            TokenHash = SHA256.HashData(Encoding.UTF8.GetBytes(raw)),
+            TokenHash = tokenHash,
             ExpiresAtUtc = expires
+        });
+        session.Timeline.Add(new EmergencyTimelineEvent
+        {
+            EmergencySessionId = sessionId,
+            Sequence = session.Timeline.Count == 0 ? 1 : session.Timeline.Max(entry => entry.Sequence) + 1,
+            Type = "participant-invited",
+            Message = "A time-limited participant invitation was created.",
+            IdempotencyKey = commandKey,
+            ActorUserId = ownerId
         });
         dbContext.AuditEvents.Add(new AuditEvent { ActorUserId = ownerId, Action = "participant-invited", ResourceType = "EmergencyParticipant", ResourceId = participant.Id.ToString() });
         await dbContext.SaveChangesAsync(cancellationToken);

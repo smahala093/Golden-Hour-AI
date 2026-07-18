@@ -18,6 +18,7 @@ export function useSessionConnection(sessionId: string | undefined, online: bool
 
     let connection: HubConnection | undefined;
     let disposed = false;
+    let retryTimer: number | undefined;
 
     async function connect(): Promise<void> {
       connection = new HubConnectionBuilder()
@@ -31,6 +32,7 @@ export function useSessionConnection(sessionId: string | undefined, online: bool
       connection.on('TimelineAdded', handleUpdate);
       connection.on('TaskUpdated', handleUpdate);
       connection.on('ParticipantJoined', handleUpdate);
+      connection.on('ContactAcknowledged', handleUpdate);
       connection.onreconnecting(() => setState('connecting'));
       connection.onreconnected(() => {
         void (async () => {
@@ -44,25 +46,37 @@ export function useSessionConnection(sessionId: string | undefined, online: bool
         })();
       });
       connection.onclose(() => {
-        if (!disposed) setState('polling');
+        if (!disposed) {
+          setState('polling');
+          retryTimer = window.setTimeout(() => { void startConnection(); }, 10_000);
+        }
       });
 
-      try {
-        setState('connecting');
-        await connection.start();
-        await connection.invoke('JoinSession', sessionId);
-        if (!disposed) {
-          refreshRef.current();
-          setState('connected');
+      async function startConnection(): Promise<void> {
+        if (disposed || !connection || connection.state !== HubConnectionState.Disconnected) return;
+        try {
+          setState('connecting');
+          await connection.start();
+          await connection.invoke('JoinSession', sessionId);
+          if (!disposed) {
+            refreshRef.current();
+            setState('connected');
+          }
+        } catch {
+          if (!disposed) {
+            setState('polling');
+            retryTimer = window.setTimeout(() => { void startConnection(); }, 10_000);
+          }
         }
-      } catch {
-        if (!disposed) setState('polling');
       }
+
+      await startConnection();
     }
 
     void connect();
     return () => {
       disposed = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       if (connection?.state !== HubConnectionState.Disconnected) void connection?.stop();
     };
   }, [online, sessionId]);

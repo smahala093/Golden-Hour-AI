@@ -1,33 +1,130 @@
 {
   "type": "object",
   "properties": {
-    "detectedLanguage": { "type": "string" },
+    "detectedLanguage": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 35,
+      "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+    },
     "languageConfidence": { "type": "number", "minimum": 0, "maximum": 1 },
     "incidentCategory": { "type": "string", "enum": ["chest_pain", "breathing_difficulty", "fall_or_injury", "unconscious", "seizure", "heavy_bleeding", "road_accident", "allergic_reaction", "child_emergency", "other", "unknown"] },
     "patientRelationship": { "type": "string", "enum": ["self", "family", "bystander", "unknown"] },
-    "observations": { "type": "array", "items": { "type": "string" } },
-    "reportedSymptomStartTime": { "type": ["string", "null"] },
+    "observations": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 240,
+        "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+      }
+    },
+    "reportedSymptomStartTime": {
+      "anyOf": [
+        { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F-\\u009F]+$" },
+        { "type": "null" }
+      ]
+    },
     "isConscious": { "type": "string", "enum": ["yes", "no", "unknown"] },
     "isBreathingNormally": { "type": "string", "enum": ["yes", "no", "unknown"] },
     "isHeavyBleedingReported": { "type": "string", "enum": ["yes", "no", "unknown"] },
-    "locationDescription": { "type": ["string", "null"] },
+    "locationDescription": {
+      "anyOf": [
+        { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F-\\u009F]+$" },
+        { "type": "null" }
+      ]
+    },
     "urgencyClassification": { "type": "string", "enum": ["emergency", "urgent", "unknown"] },
     "criticalMissingQuestions": {
       "type": "array",
       "maxItems": 3,
+      "uniqueItems": true,
       "items": {
-        "type": "object",
-        "properties": {
-          "id": { "type": "string" },
-          "question": { "type": "string" },
-          "answerType": { "type": "string", "enum": ["yes_no", "single_choice", "time", "text"] }
-        },
-        "required": ["id", "question", "answerType"],
-        "additionalProperties": false
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "const": "conscious" },
+              "question": { "type": "string", "const": "Is the person conscious?" },
+              "answerType": { "type": "string", "const": "yes_no" }
+            },
+            "required": ["id", "question", "answerType"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "const": "breathing" },
+              "question": { "type": "string", "const": "Is the person breathing normally?" },
+              "answerType": { "type": "string", "const": "yes_no" }
+            },
+            "required": ["id", "question", "answerType"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "const": "breathing-normally" },
+              "question": { "type": "string", "const": "Is the person breathing normally?" },
+              "answerType": { "type": "string", "const": "yes_no" }
+            },
+            "required": ["id", "question", "answerType"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "const": "heavy-bleeding" },
+              "question": { "type": "string", "const": "Is heavy bleeding visible?" },
+              "answerType": { "type": "string", "const": "yes_no" }
+            },
+            "required": ["id", "question", "answerType"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "const": "confirm-facts" },
+              "question": { "type": "string", "const": "Do the extracted facts match what you reported?" },
+              "answerType": { "type": "string", "const": "yes_no" }
+            },
+            "required": ["id", "question", "answerType"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "const": "symptom-start-time" },
+              "question": { "type": "string", "const": "When did the reported symptoms start?" },
+              "answerType": { "type": "string", "enum": ["time", "text"] }
+            },
+            "required": ["id", "question", "answerType"],
+            "additionalProperties": false
+          }
+        ]
       }
     },
-    "handoverFacts": { "type": "array", "items": { "type": "string" } },
-    "uncertainties": { "type": "array", "items": { "type": "string" } },
+    "handoverFacts": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 240,
+        "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+      }
+    },
+    "uncertainties": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 240,
+        "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+      }
+    },
     "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
   },
   "required": ["detectedLanguage", "languageConfidence", "incidentCategory", "patientRelationship", "observations", "reportedSymptomStartTime", "isConscious", "isBreathingNormally", "isHeavyBleedingReported", "locationDescription", "urgencyClassification", "criticalMissingQuestions", "handoverFacts", "uncertainties", "confidence"],

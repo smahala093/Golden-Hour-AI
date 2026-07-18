@@ -1,0 +1,286 @@
+name: Security and supply chain
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 2 * * 1'
+  workflow_dispatch:
+
+# Jobs opt into only the additional permissions they need.
+permissions:
+  contents: read
+
+concurrency:
+  group: security-supply-chain-${{ github.workflow }}-${{ github.ref }}
+  # Never interrupt an explicitly requested publication run.
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+
+jobs:
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: csharp
+            build_mode: manual
+          - language: javascript-typescript
+            build_mode: none
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build_mode }}
+          queries: security-extended
+
+      - name: Set up .NET
+        if: matrix.language == 'csharp'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+          cache: true
+          cache-dependency-path: |
+            **/*.csproj
+            global.json
+
+      - name: Build C# database
+        if: matrix.language == 'csharp'
+        run: |
+          dotnet restore GoldenHourAI.sln
+          dotnet build GoldenHourAI.sln --configuration Release --no-restore
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}
+
+  container-security:
+    name: Container SBOM and vulnerability gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build scan candidate without publishing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          push: false
+          tags: golden-hour-ai:security-${{ github.sha }}
+          cache-from: type=gha,scope=security-image
+          cache-to: type=gha,mode=max,scope=security-image
+
+      - name: Prepare evidence directory
+        run: mkdir -p security-evidence
+
+      - name: Generate deployable-image SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: golden-hour-ai:security-${{ github.sha }}
+          format: spdx-json
+          output-file: security-evidence/golden-hour-container.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Scan image for high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: golden-hour-ai:security-${{ github.sha }}
+          scanners: vuln
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: false
+          format: sarif
+          output: security-evidence/trivy-results.sarif
+          exit-code: '1'
+
+      - name: Upload Trivy findings to code scanning
+        if: always() && hashFiles('security-evidence/trivy-results.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: security-evidence/trivy-results.sarif
+          category: trivy-container
+
+      - name: Upload SBOM and scan evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-security-evidence-${{ github.run_id }}
+          path: security-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-signed-image:
+    name: Publish immutable signed image and attestations
+    needs: container-security
+    # Publishing is an explicit release side effect. Main pushes are scanned but
+    # do not publish because the Azure deployment does not consume this GHCR image.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Derive lowercase immutable image name
+        id: image
+        shell: bash
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "name=${image}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${image}:${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install Cosign before registry authentication
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Build immutable image candidate
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          push: false
+          tags: ${{ steps.image.outputs.tag }}
+          cache-from: type=gha,scope=security-image
+          cache-to: type=gha,mode=max,scope=security-image
+
+      - name: Prepare publish evidence directory
+        run: mkdir -p publish-evidence
+
+      # This SBOM and scan are intentionally generated from the exact local image
+      # that is pushed below, rather than from a second non-identical rebuild.
+      - name: Generate exact-image SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.image.outputs.tag }}
+          format: spdx-json
+          output-file: publish-evidence/golden-hour-container.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Scan exact image before publication
+        id: publish_scan
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.image.outputs.tag }}
+          scanners: vuln
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: false
+          format: sarif
+          output: publish-evidence/trivy-results.sarif
+          exit-code: '1'
+
+      - name: Upload exact-image SBOM and scan evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-image-security-evidence-${{ github.run_id }}
+          path: publish-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Enforce exact-image vulnerability gate
+        if: steps.publish_scan.outcome != 'success'
+        run: |
+          echo 'Trivy failed or found a high/critical image vulnerability; publication is blocked.' >&2
+          exit 1
+
+      - name: Authenticate to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish immutable image after the gate
+        id: publish
+        env:
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+        shell: bash
+        run: |
+          docker push "${IMAGE_TAG}"
+          image_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "${IMAGE_TAG}")"
+          digest="${image_ref##*@}"
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo 'The registry did not return a valid immutable image digest.' >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest scanned SBOM
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          sbom-path: publish-evidence/golden-hour-container.spdx.json
+          push-to-registry: true
+
+      - name: Keyless-sign image by digest
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Verify keyless signature identity
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          CERTIFICATE_IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/security-supply-chain.yml@${{ github.ref }}
+        run: >-
+          cosign verify "${IMAGE}@${DIGEST}"
+          --certificate-identity "${CERTIFICATE_IDENTITY}"
+          --certificate-oidc-issuer "https://token.actions.githubusercontent.com"

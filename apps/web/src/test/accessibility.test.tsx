@@ -27,6 +27,7 @@ describe('public emergency entry accessibility', () => {
 
     const call = screen.getByRole('link', { name: 'Call 112' });
     expect(call).toHaveAttribute('href', 'tel:112');
+    expect(screen.getByRole('complementary', { name: 'Call emergency services' })).toContainElement(call);
     expect(screen.getByText(/not a doctor, diagnostic system/i)).toBeVisible();
 
     const results = await axe.run(container);

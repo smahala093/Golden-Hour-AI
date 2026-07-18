@@ -14,15 +14,10 @@ public sealed class OpenAiOptions
     public string BaseUrl { get; set; } = "https://api.openai.com/v1/";
     public string Model { get; set; } = "gpt-4.1-mini";
     public string SpeechModel { get; set; } = "gpt-4o-mini-transcribe";
-    public string TextToSpeechModel { get; set; } = "gpt-4o-mini-tts";
+    public string TextToSpeechModel { get; set; } = "tts-1";
     public string TextToSpeechVoice { get; set; } = "alloy";
     public string ApiKey { get; set; } = string.Empty;
     public int TimeoutSeconds { get; set; } = 15;
-}
-
-public sealed class AiProviderException(string code, string message) : Exception(message)
-{
-    public string Code { get; } = code;
 }
 
 public sealed class OpenAiResponsesProvider(
@@ -37,22 +32,22 @@ public sealed class OpenAiResponsesProvider(
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
     };
 
-    public async Task<IncidentExtraction> ExtractIncidentAsync(string originalText, string? selectedLanguage, CancellationToken cancellationToken)
+    public async Task<AiProviderResult<IncidentExtraction>> ExtractIncidentAsync(string originalText, string? selectedLanguage, CancellationToken cancellationToken)
     {
         var prompt = promptStore.Read("incident-extraction.v1.txt");
         var schema = JsonDocument.Parse(promptStore.Read("incident-extraction.schema.v1.json")).RootElement.Clone();
         var minimizedText = dataMinimizer.Minimize(originalText);
         var userContent = $"Selected language (may be blank): {selectedLanguage ?? ""}\n<incident_text>\n{minimizedText}\n</incident_text>";
-        var json = await SendStructuredAsync("incident_extraction", prompt, userContent, "incident_extraction_v1", schema, 1400, cancellationToken);
+        var response = await SendStructuredAsync("incident_extraction", prompt, userContent, "incident_extraction_v1", schema, 1400, cancellationToken);
         try
         {
-            return JsonSerializer.Deserialize<IncidentExtraction>(json, JsonOptions)
-                ?? throw new AiProviderException("empty_output", "The AI response was empty.");
+            var extraction = JsonSerializer.Deserialize<IncidentExtraction>(response.Text, JsonOptions)
+                ?? throw new AiProviderException("empty_output", "The AI response was empty.", response.Metadata);
+            return new AiProviderResult<IncidentExtraction>(extraction, response.Metadata);
         }
-        catch (JsonException exception)
+        catch (JsonException)
         {
-            _ = exception;
-            throw new AiProviderException("malformed_output", "The AI response did not match the incident contract.");
+            throw new AiProviderException("malformed_output", "The AI response did not match the incident contract.", response.Metadata);
         }
     }
 
@@ -62,7 +57,7 @@ public sealed class OpenAiResponsesProvider(
             {"type":"object","properties":{"translatedText":{"type":"string"}},"required":["translatedText"],"additionalProperties":false}
             """).RootElement.Clone();
         var userContent = $"Target language: {targetLanguage}\n<approved_text>\n{text}\n</approved_text>";
-        var json = await SendStructuredAsync(
+        var response = await SendStructuredAsync(
             "translation",
             promptStore.Read("translation.v1.txt"),
             userContent,
@@ -70,12 +65,12 @@ public sealed class OpenAiResponsesProvider(
             schema,
             1000,
             cancellationToken);
-        using var document = JsonDocument.Parse(json);
+        using var document = JsonDocument.Parse(response.Text);
         return document.RootElement.GetProperty("translatedText").GetString()
             ?? throw new AiProviderException("empty_output", "The translated text was empty.");
     }
 
-    public async Task<IReadOnlyList<string>> SuggestCoordinationTaskCodesAsync(IncidentExtraction incident, CancellationToken cancellationToken)
+    public async Task<AiProviderResult<IReadOnlyList<string>>> SuggestCoordinationTaskCodesAsync(IncidentExtraction incident, CancellationToken cancellationToken)
     {
         var schema = JsonDocument.Parse("""
             {
@@ -85,7 +80,7 @@ public sealed class OpenAiResponsesProvider(
             }
             """).RootElement.Clone();
         var incidentJson = JsonSerializer.Serialize(incident, JsonOptions);
-        var json = await SendStructuredAsync(
+        var response = await SendStructuredAsync(
             "coordination_task_suggestion",
             promptStore.Read("coordination-task-suggestion.v1.txt"),
             $"<incident_facts>\n{incidentJson}\n</incident_facts>",
@@ -93,15 +88,27 @@ public sealed class OpenAiResponsesProvider(
             schema,
             400,
             cancellationToken);
-        using var document = JsonDocument.Parse(json);
-        return document.RootElement.GetProperty("taskCodes").EnumerateArray()
-            .Select(x => x.GetString())
-            .Where(x => x is not null)
-            .Cast<string>()
-            .ToArray();
+        try
+        {
+            using var document = JsonDocument.Parse(response.Text);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Any(property => property.Name != "taskCodes")
+                || !root.TryGetProperty("taskCodes", out var taskCodes) || taskCodes.ValueKind != JsonValueKind.Array)
+                throw new JsonException();
+            IReadOnlyList<string> codes = taskCodes.EnumerateArray()
+                .Select(x => x.GetString())
+                .Where(x => x is not null)
+                .Cast<string>()
+                .ToArray();
+            return new AiProviderResult<IReadOnlyList<string>>(codes, response.Metadata);
+        }
+        catch (JsonException)
+        {
+            throw new AiProviderException("malformed_output", "The AI response did not match the coordination task contract.", response.Metadata);
+        }
     }
 
-    private async Task<string> SendStructuredAsync(
+    private async Task<StructuredAiResponse> SendStructuredAsync(
         string operation,
         string systemPrompt,
         string userContent,
@@ -139,6 +146,14 @@ public sealed class OpenAiResponsesProvider(
         };
 
         var started = Stopwatch.GetTimestamp();
+        AiCallMetadata Metadata(int? inputTokens = null, int? outputTokens = null) => new(
+            operation,
+            "openai",
+            configured.Model,
+            Math.Max(0, (long)Math.Ceiling(Stopwatch.GetElapsedTime(started).TotalMilliseconds)),
+            inputTokens,
+            outputTokens);
+
         for (var attempt = 0; attempt < 3; attempt++)
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, "responses")
@@ -147,7 +162,22 @@ public sealed class OpenAiResponsesProvider(
             };
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", configured.ApiKey);
 
-            using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            HttpResponseMessage response;
+            try
+            {
+                response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new AiProviderException("timeout", "The AI provider timed out.", Metadata());
+            }
+            catch (HttpRequestException)
+            {
+                throw new AiProviderException("provider_error", "The AI provider did not complete the request.", Metadata());
+            }
+
+            using (response)
+            {
             if (IsTransient(response.StatusCode) && attempt < 2)
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(250 * Math.Pow(2, attempt)), cancellationToken);
@@ -159,20 +189,34 @@ public sealed class OpenAiResponsesProvider(
                 logger.LogWarning("OpenAI {Operation} failed with status {StatusCode} after {LatencyMs} ms.", operation, (int)response.StatusCode, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
                 throw new AiProviderException(
                     response.StatusCode == HttpStatusCode.TooManyRequests ? "rate_limited" : "provider_error",
-                    "The AI provider did not complete the request.");
+                    "The AI provider did not complete the request.",
+                    Metadata());
             }
 
             await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var document = await JsonDocument.ParseAsync(responseStream, cancellationToken: cancellationToken);
+            JsonDocument document;
+            try
+            {
+                document = await JsonDocument.ParseAsync(responseStream, cancellationToken: cancellationToken);
+            }
+            catch (JsonException)
+            {
+                throw new AiProviderException("malformed_output", "The AI provider response was malformed.", Metadata());
+            }
+
+            using (document)
+            {
             var root = document.RootElement;
+            var (inputTokens, outputTokens) = ReadUsage(root);
+            var metadata = Metadata(inputTokens, outputTokens);
             if (root.TryGetProperty("status", out var status) && status.GetString() == "incomplete")
             {
-                throw new AiProviderException("incomplete_output", "The AI provider returned an incomplete response.");
+                throw new AiProviderException("incomplete_output", "The AI provider returned an incomplete response.", metadata);
             }
 
             if (!root.TryGetProperty("output", out var output))
             {
-                throw new AiProviderException("malformed_output", "The AI provider response had no output.");
+                throw new AiProviderException("malformed_output", "The AI provider response had no output.", metadata);
             }
 
             foreach (var item in output.EnumerateArray())
@@ -188,22 +232,45 @@ public sealed class OpenAiResponsesProvider(
                     var type = part.GetProperty("type").GetString();
                     if (type == "refusal")
                     {
-                        throw new AiProviderException("refusal", "The AI provider refused the extraction request.");
+                        throw new AiProviderException("refusal", "The AI provider refused the extraction request.", metadata);
                     }
 
                     if (type == "output_text" && part.TryGetProperty("text", out var text))
                     {
                         logger.LogInformation("OpenAI {Operation} completed with model {Model} in {LatencyMs} ms.", operation, configured.Model, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
-                        return text.GetString() ?? throw new AiProviderException("empty_output", "The AI provider returned empty output.");
+                        return new StructuredAiResponse(
+                            text.GetString() ?? throw new AiProviderException("empty_output", "The AI provider returned empty output.", metadata),
+                            metadata);
                     }
                 }
             }
 
-            throw new AiProviderException("empty_output", "The AI provider returned no usable text output.");
+            throw new AiProviderException("empty_output", "The AI provider returned no usable text output.", metadata);
+            }
+            }
         }
 
-        throw new AiProviderException("provider_error", "The AI provider did not complete the request.");
+        throw new AiProviderException("provider_error", "The AI provider did not complete the request.", Metadata());
     }
+
+    private static (int? InputTokens, int? OutputTokens) ReadUsage(JsonElement root)
+    {
+        if (!root.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
+        {
+            return (null, null);
+        }
+
+        return (ReadNonNegativeInt32(usage, "input_tokens"), ReadNonNegativeInt32(usage, "output_tokens"));
+    }
+
+    private static int? ReadNonNegativeInt32(JsonElement parent, string propertyName) =>
+        parent.TryGetProperty(propertyName, out var value)
+        && value.TryGetInt32(out var parsed)
+        && parsed >= 0
+            ? parsed
+            : null;
+
+    private sealed record StructuredAiResponse(string Text, AiCallMetadata Metadata);
 
     private static bool IsTransient(HttpStatusCode statusCode) =>
         statusCode == HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
@@ -252,7 +319,11 @@ public sealed class OpenAiSpeechToTextProvider(
         var language = document.RootElement.TryGetProperty("language", out var detected)
             ? detected.GetString() ?? languageHint ?? "und"
             : languageHint ?? "und";
-        return new SpeechTranscription(transcript, language, language == "und" ? 0.5m : 0.9m);
+        var duration = document.RootElement.TryGetProperty("duration", out var durationElement)
+            && durationElement.TryGetDecimal(out var parsedDuration)
+                ? parsedDuration
+                : (decimal?)null;
+        return new SpeechTranscription(transcript, language, language == "und" ? 0.5m : 0.9m, duration);
     }
 }
 

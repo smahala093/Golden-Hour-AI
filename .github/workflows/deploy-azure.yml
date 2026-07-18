@@ -71,6 +71,8 @@ jobs:
           JWT_SIGNING_KEY: ${{ secrets.JWT_SIGNING_KEY }}
           WEBHOOK_SIGNING_SECRET: ${{ secrets.WEBHOOK_SIGNING_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SMS_GATEWAY_SIGNING_SECRET: ${{ secrets.SMS_GATEWAY_SIGNING_SECRET }}
+          SMS_GATEWAY_ENDPOINT: ${{ vars.SMS_GATEWAY_ENDPOINT }}
           DEMO_PASSWORD: ${{ secrets.DEMO_PASSWORD }}
           DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
           RESOURCE_GROUP: ${{ inputs.resource_group }}
@@ -84,6 +86,15 @@ jobs:
           foreach ($name in $required) {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
               throw "Required deployment secret '$name' is not configured in the selected GitHub environment."
+            }
+          }
+
+          $useMocks = [Convert]::ToBoolean($env:USE_MOCK_PROVIDERS)
+          if (-not $useMocks) {
+            foreach ($name in @('OPENAI_API_KEY', 'SMS_GATEWAY_SIGNING_SECRET', 'SMS_GATEWAY_ENDPOINT')) {
+              if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+                throw "Real-provider deployment setting '$name' is not configured in the selected GitHub environment."
+              }
             }
           }
 
@@ -101,11 +112,15 @@ jobs:
             PostgresAdminPassword = To-Secure $env:POSTGRES_ADMIN_PASSWORD
             JwtSigningKey = To-Secure $env:JWT_SIGNING_KEY
             WebhookSigningSecret = To-Secure $env:WEBHOOK_SIGNING_SECRET
-            UseMockProviders = [Convert]::ToBoolean($env:USE_MOCK_PROVIDERS)
+            UseMockProviders = $useMocks
             ImageTag = $env:IMAGE_TAG
           }
           if (-not [string]::IsNullOrEmpty($env:OPENAI_API_KEY)) {
             $parameters.OpenAiApiKey = To-Secure $env:OPENAI_API_KEY
+          }
+          if (-not $useMocks) {
+            $parameters.SmsGatewayEndpoint = $env:SMS_GATEWAY_ENDPOINT
+            $parameters.SmsGatewaySigningSecret = To-Secure $env:SMS_GATEWAY_SIGNING_SECRET
           }
           if ($env:DEPLOY_ENVIRONMENT -ne 'prod' -and -not [string]::IsNullOrEmpty($env:DEMO_PASSWORD)) {
             $parameters.DemoPassword = To-Secure $env:DEMO_PASSWORD

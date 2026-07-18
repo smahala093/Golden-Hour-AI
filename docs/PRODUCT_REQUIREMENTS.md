@@ -10,6 +10,8 @@ Golden Hour AI helps a patient, family member, or bystander turn fragmented emer
 
 Golden Hour AI is not a doctor, diagnostic system, ambulance provider, or replacement for emergency services.
 
+This document is the target product specification, not a claim that every external release gate is complete. Current implementation/evidence is tracked in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) and [TEST_PLAN.md](TEST_PLAN.md). In particular, model translation, an administrator provider-status experience, production maps/email/general notifications/Azure messaging/storage/telemetry adapters, real-provider delivery evidence, hosted deployment, and clinical/localization/privacy/security/manual-accessibility approval remain open.
+
 ## Goals
 
 1. Make the configured emergency-call action immediately available without waiting for registration, AI, or network processing.

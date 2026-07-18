@@ -4,14 +4,14 @@
 
 This plan separates required coverage from observed results. A checked-in test, workflow, or report path is not proof that a command passed. Never fabricate a test result, coverage percentage, screenshot, external delivery, deployment, APK, or AAB. Never weaken, skip, or delete a test to make CI pass.
 
-At the time this document was created, final clean-checkout verification had not yet been completed. Record the exact command, UTC time, environment/tool versions, exit code, report/artifact path, and genuine limitation in the verification log below after each run.
+The verification log records the local commands that were actually observed on 2026-07-18. It is evidence for this working tree only, not a claim of a clean-checkout CI run, clinical approval, external-provider delivery, hosted deployment, or production certification. External and manual gates remain visible as blocked or unverified.
 
 ## Quality gates
 
 | Gate | Command | Expected evidence |
 | --- | --- | --- |
 | Backend restore/build | `dotnet build GoldenHourAI.sln --configuration Release` | Exit 0 with analyzers and nullable warnings treated as errors |
-| Backend tests/coverage | `dotnet test GoldenHourAI.sln --configuration Release --collect:"XPlat Code Coverage" --results-directory TestResults` | xUnit/TRX console result and Cobertura files under `TestResults/` |
+| Backend tests/coverage | `dotnet test GoldenHourAI.sln --configuration Release --collect:"XPlat Code Coverage" --results-directory TestResults` | Console test summary and Cobertura files under `TestResults/`; add `--logger "trx"` when a TRX artifact is required |
 | Web install | `npm ci --prefix apps/web` | Lockfile-resolved clean install exits 0 |
 | Web lint | `npm run lint --prefix apps/web` | ESLint exits 0 with zero warnings |
 | Web strict typecheck | `npm run typecheck --prefix apps/web` | TypeScript project build exits 0 |
@@ -20,18 +20,18 @@ At the time this document was created, final clean-checkout verification had not
 | End-to-end install | `npm ci --prefix tests/e2e` | Locked install exits 0 |
 | Playwright Chromium | `npm exec --prefix tests/e2e -- playwright install chromium` then `npm run test:e2e --prefix tests/e2e` | Desktop/mobile results under `tests/e2e/playwright-report/` and screenshots/traces only on configured cases |
 | Container config | `docker compose config --quiet` | Exit 0; no resolved secret printed or committed |
-| Container build/start | `docker compose up --build --detach` | Healthy PostgreSQL and app containers; follow with health/smoke scripts |
+| Container build/start | `docker compose up --build --detach --wait` | Healthy PostgreSQL and app containers; follow with health/smoke scripts |
 | Health/smoke | `./infrastructure/scripts/health-check.ps1 -BaseUrl http://localhost:8080` and `./infrastructure/scripts/smoke-test.ps1 -BaseUrl http://localhost:8080` | Liveness/readiness and safe public contract checks exit 0 |
 | Bicep validation | `az bicep build --file infrastructure/bicep/main.bicep` plus `az deployment group validate ...` | Local compile and subscription validation exit 0 |
 | Secret/dependency/container review | CI scanners plus manual configuration inspection | Findings triaged; no credentials or sensitive fixtures in repository/artifacts |
 
-Run Node 22 in CI/local builds because the configured Vite toolchain does not support older Node releases. Use .NET SDK 8 for the release gate even if a later SDK can compile the target.
+CI and the Docker web-build stage pin Node 22. The recorded Windows verification used bundled Node 24.14.0; neither result is evidence for unsupported older Node releases. The application targets .NET 8; the recorded local run used .NET SDK 9.0.316 to build that target, while CI and containers remain pinned to .NET 8.
 
 ## Test layers
 
 ### Domain
 
-Fast tests with no HTTP/database/cloud dependencies cover deterministic readiness scoring, emergency/task/session transitions, idempotency identity, protocol selection, allowlisted tasks, provenance, confirmation/unknown semantics, summary projection, concurrency decisions, and forbidden AI content. Exercise positive and invalid transition paths.
+Domain tests with no HTTP/database/cloud dependencies cover deterministic readiness scoring, the allowlisted task catalogue, emergency/task/session transitions, and protocol selection, including invalid paths. Idempotency, provenance, confirmation/unknown semantics, summary projection, concurrency, and forbidden AI content are exercised in the Application and Integration suites rather than attributed to the Domain project.
 
 ### Application services
 
@@ -39,7 +39,7 @@ Use mocked interfaces and a controllable UTC clock to verify orchestration order
 
 ### API/integration
 
-`WebApplicationFactory` exercises model validation, Problem Details/correlation IDs, Identity/auth cookies, CSRF, refresh rotation/reuse, role/resource policies, rate limits, file constraints, EF behavior, webhooks, health endpoints, OpenAPI, and SignalR group authorization. PostgreSQL-specific indexes/concurrency/transactions require a real isolated PostgreSQL instance in CI or a clearly recorded environment limitation; an in-memory provider is not sufficient evidence for database semantics.
+The target `WebApplicationFactory` layer includes model validation, Problem Details/correlation IDs, Identity/auth cookies, CSRF, refresh rotation/reuse, role/resource policies, rate limits, upload constraints, EF behavior, webhooks, health endpoints, OpenAPI, and SignalR group authorization. The recorded suite is evidence only for its checked-in test cases; it does not currently include an explicit rate-limit or OpenAPI assertion. PostgreSQL-specific indexes/concurrency/transactions require a real isolated PostgreSQL instance in CI or a clearly recorded environment limitation; an in-memory provider is not sufficient evidence for database semantics.
 
 ### Web component/integration
 
@@ -47,7 +47,7 @@ Testing Library and Vitest cover accessible names/roles, focus/error behavior, e
 
 ### End-to-end
 
-Playwright runs deterministic mock mode in desktop Chromium and a mobile viewport. It covers user and bystander journeys, two browser contexts for realtime coordination, refresh/reconnect, offline/degraded behavior, PWA install resources, screenshots for the demo journey, and storage/cache inspection. Do not put demo passwords or entered medical data in retained traces/screenshots for public runs.
+Playwright runs one deterministic mock desktop journey, one mock mobile accessibility/privacy journey, and one real-API authoritative-state/bystander-projection journey using separate contexts. The current suite does not force a SignalR reconnect, inspect complete Cache Storage contents, or prove offline reconnect/exactly-once server sync; those remain release-gate scenarios below. Do not put demo passwords or entered medical data in retained traces/screenshots for public runs.
 
 ## Positive scenario matrix
 
@@ -92,6 +92,8 @@ The required assertions include what must **not** happen. A generic error withou
 - User/document prompt attempts to override instructions, exfiltrate secrets, invoke tools, change sharing, join sessions, or mark actions successful have no privileged effect.
 - Translation failure or structural alteration falls back to approved source/English content and announces the limitation.
 
+The provider-envelope, timeout, retry, 429, refusal, malformed-output, extra-field, forbidden-content, and fallback cases are implemented automated evidence. Document-ingestion prompt injection and translation-preservation/structural-alteration suites are future release gates because document ingestion and active translation are not implemented.
+
 ## Accessibility manual matrix
 
 Automated rules cannot validate all panic-condition accessibility. Record browser/OS/assistive technology and findings for:
@@ -132,15 +134,20 @@ Merge coverage by project only when paths and source roots are normalized. Publi
 
 ## Verification log
 
-Replace `Pending` only after observing the command. Keep failed/blocked rows and explain the environment limitation.
+Keep failed/blocked rows and explain the environment limitation. A local pass does not close the external review or deployment gates.
 
 | UTC time | Environment | Command/gate | Result | Evidence / limitation |
 | --- | --- | --- | --- | --- |
-| Pending | Pending | Backend build/tests/coverage | Not yet recorded | Final verification required |
-| Pending | Pending | Web lint/type/test/build/coverage | Not yet recorded | Final verification required |
-| Pending | Pending | Playwright desktop/mobile | Not yet recorded | Final verification required |
-| Pending | Pending | Docker Compose + health/smoke | Not yet recorded | Final verification required |
-| Pending | Pending | Bicep build/validate/what-if | Not yet recorded | Requires Azure CLI/subscription for server-side validation |
-| Pending | Pending | Android debug APK / release AAB | Not generated | Requires Android toolchain; release additionally requires owner signing secrets |
+| 2026-07-18 04:05-05:24Z | Windows; .NET SDK 9.0.316 targeting `net8.0`; VSTest 17.14.1 | Release build; full tests; XPlat coverage | **Pass**: final build 0 warnings/errors; 142/142 tests (34 Domain, 75 Application, 33 Integration), 0 failed/skipped | Fresh Cobertura files under `TestResults-Coverage-20260718-FinalBackend3/`; critical Domain/Application union line coverage 612/626 = 97.76%. Includes authorization-before-STT/provider-not-called and 12-way webhook-idempotency regressions. PostgreSQL cross-instance webhook-conflict behavior remains a dedicated integration gate. |
+| 2026-07-18 03:55-04:29Z | Windows; bundled Node 24.14.0; npm 9.5.1 | ESLint; strict typecheck; Vitest; coverage; official `npm run build --prefix apps/web` | **Pass**: ESLint/typecheck/build exit 0; 15 files/46 tests passed; PWA generated 14 precache entries | LCOV: `apps/web/coverage/lcov.info`; statements 55.27%, branches 70.37%, functions 60.53%, lines 55.27%. Production build: 1,783 modules, service worker and manifest generated. Rollup reported a non-fatal 638.90 kB chunk-size warning. |
+| 2026-07-18 04:38Z | Windows; Playwright 1.61.1; managed Vite/ASP.NET servers | `npm run test:e2e` across `mock-desktop`, `mock-mobile`, and `real-api` | **Pass**: 3/3 expected, 0 unexpected/flaky/skipped; 150.5 seconds | `tests/e2e/test-results/.last-run.json` and `tests/e2e/playwright-report/index.html`. Only inspected `docs/screenshots/landing.png` and `reviewed-action.png` are publishable; profile/coordination captures remain ignored and unpublished. |
+| 2026-07-18 04:31Z | Windows; npm advisory service | Web production/full and E2E dependency audits; NuGet direct/transitive audit | **Pass**: 0 known npm vulnerabilities in each dependency graph; no known vulnerable NuGet packages reported | Advisory results are time-bound and do not replace SAST, container scanning, or penetration testing. |
+| 2026-07-18 04:32-05:24Z | Windows; Git, PowerShell, Node, Docker CLI 27.1.1 | Compose/static/repository hygiene | **Partial pass**: Compose config, `git diff --check`, 23 JSON files, 8 PowerShell scripts, 37 relative Markdown targets across 12 files, PWA manifest/icon/precache inspection, 8/8 protocol notices, mojibake check, and refined high-signal credential scan passed | A local workflow-YAML parser dependency was unavailable; Compose was parsed by Docker, and Bicep compiled separately. Workflow execution/syntax remains in the external CI row. |
+| 2026-07-18 04:43-05:16Z | Docker Desktop/Compose 27.1.1; Node 22 and .NET 8 Alpine build stages; PostgreSQL 16 | `docker compose up --build --detach --wait`; health/smoke scripts; fictional API smoke; schema inspection | **Pass after two product fixes**: app/PostgreSQL healthy, non-root UID 1654, health/readiness/root/manifest public cache/anonymous capability/mock extraction/reviewed protocol passed; 2 EF migrations and 29 app tables observed | First run exposed missing Alpine ICU; the next exposed PowerShell's read-only `$HOME` collision. Added `icu-libs`, renamed the script variable, rebuilt the final security-fixed image, and reran all checks successfully. No real provider or clinical behavior was asserted. |
+| 2026-07-18 05:13Z | Official `mcr.microsoft.com/azure-cli:latest` container | `az bicep build --file /src/main.bicep --stdout` | **Pass: local Bicep compile** | Azure subscription validation, what-if, deployment, migration job, traffic promotion, backup/restore, and rollback were not run and require owner authentication/permissions. |
+| 2026-07-18 04:40Z | Windows | Android debug APK / release AAB | **Not generated** | `java`, `adb`, and `gradle` are unavailable; release also requires owner-managed signing material and a verified remote API/cookie-auth topology. |
+| Not run locally | GitHub-hosted runner / security services | Workflow execution, CodeQL/dependency/container scans | **Unverified external gate** | Workflow files are present, but no CI run URL or scanner result was observed locally; the local YAML parser dependency was unavailable. |
+| Not run locally | Real browser/OS/assistive technology | Manual accessibility matrix | **Unverified external gate** | Automated semantic/axe coverage passed, but keyboard, screen reader, 200%/400% zoom, forced colors, reduced motion, RTL, and device testing require a recorded human review. |
+| Not run locally | Owner/provider environments | Clinical/localization/privacy/security/provider/deployment gates | **Unverified external gates** | Requires clinician and localization approval, DPIA/retention review, penetration test, load/backup/restore/rollback exercises, real OpenAI/SMS contracts and delivery reconciliation, and Azure deployment evidence. |
 
 CI run URLs and hosted/deployed URLs must be added only after those external operations genuinely succeed.

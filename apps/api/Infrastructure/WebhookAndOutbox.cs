@@ -14,6 +14,8 @@ public sealed class WebhookOptions
     public bool Enabled { get; set; } = true;
     public string SigningSecret { get; set; } = string.Empty;
     public int AllowedClockSkewMinutes { get; set; } = 5;
+    public string[] AllowedProviders { get; set; } = ["mock-sms"];
+    public string[] AllowedStatuses { get; set; } = ["queued", "sent", "delivered", "failed", "undelivered", "rejected"];
 }
 
 public sealed record WebhookResult(bool Duplicate, string Status);
@@ -23,6 +25,8 @@ public sealed class WebhookCoordinator(
     IOptions<WebhookOptions> options,
     IClock clock)
 {
+    private static readonly SemaphoreSlim ProcessingGate = new(1, 1);
+
     public async Task<WebhookResult> ProcessAsync(
         string provider,
         string deliveryId,
@@ -34,6 +38,10 @@ public sealed class WebhookCoordinator(
         if (body.Length is 0 or > 65_536) throw new InvalidDataException("Webhook payload size is invalid.");
         if (!options.Value.Enabled) throw new InvalidOperationException("Webhook callbacks are disabled.");
         if (string.IsNullOrWhiteSpace(options.Value.SigningSecret)) throw new InvalidOperationException("Webhook signing is not configured.");
+        var normalizedProvider = provider.Trim().ToLowerInvariant();
+        if (normalizedProvider.Length is 0 or > 80
+            || !options.Value.AllowedProviders.Contains(normalizedProvider, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidDataException("Webhook provider is not allowlisted.");
         if (!long.TryParse(timestampHeader, NumberStyles.None, CultureInfo.InvariantCulture, out var unixSeconds))
             throw new UnauthorizedAccessException("Invalid webhook timestamp.");
         var providerTime = DateTimeOffset.FromUnixTimeSeconds(unixSeconds).UtcDateTime;
@@ -42,7 +50,11 @@ public sealed class WebhookCoordinator(
         if (string.IsNullOrWhiteSpace(deliveryId) || deliveryId.Length > 160)
             throw new UnauthorizedAccessException("Webhook delivery ID is invalid.");
 
-        var signedBytes = Encoding.UTF8.GetBytes($"{timestampHeader}.{Encoding.UTF8.GetString(body)}");
+        var timestampBytes = Encoding.UTF8.GetBytes(timestampHeader);
+        var signedBytes = new byte[timestampBytes.Length + 1 + body.Length];
+        timestampBytes.CopyTo(signedBytes, 0);
+        signedBytes[timestampBytes.Length] = (byte)'.';
+        body.CopyTo(signedBytes, timestampBytes.Length + 1);
         var expected = HMACSHA256.HashData(Encoding.UTF8.GetBytes(options.Value.SigningSecret), signedBytes);
         byte[] supplied;
         try
@@ -58,9 +70,6 @@ public sealed class WebhookCoordinator(
         if (!CryptographicOperations.FixedTimeEquals(expected, supplied))
             throw new UnauthorizedAccessException("Invalid webhook signature.");
 
-        if (await dbContext.WebhookReceipts.AnyAsync(x => x.Provider == provider && x.DeliveryId == deliveryId, cancellationToken))
-            return new WebhookResult(true, "already-accepted");
-
         JsonDocument document;
         try
         {
@@ -72,36 +81,62 @@ public sealed class WebhookCoordinator(
         }
         using (document)
         {
-        var root = document.RootElement;
-        var messageId = root.TryGetProperty("messageId", out var id) ? id.GetString() : null;
-        var status = root.TryGetProperty("status", out var statusElement) ? statusElement.GetString() : null;
-        if (string.IsNullOrWhiteSpace(messageId) || string.IsNullOrWhiteSpace(status))
-            throw new InvalidDataException("Webhook payload does not contain the required delivery fields.");
+            var root = document.RootElement;
+            var messageId = root.TryGetProperty("messageId", out var id) ? id.GetString() : null;
+            var status = root.TryGetProperty("status", out var statusElement) ? statusElement.GetString() : null;
+            if (string.IsNullOrWhiteSpace(messageId) || messageId.Length > 160 || string.IsNullOrWhiteSpace(status) || status.Length > 40)
+                throw new InvalidDataException("Webhook payload does not contain the required delivery fields.");
+            var normalizedStatus = status.Trim().ToLowerInvariant();
+            if (!options.Value.AllowedStatuses.Contains(normalizedStatus, StringComparer.OrdinalIgnoreCase))
+                throw new InvalidDataException("Webhook delivery status is not allowlisted.");
 
-        dbContext.WebhookReceipts.Add(new WebhookReceipt
-        {
-            Provider = provider,
-            DeliveryId = deliveryId,
-            ProviderTimestampUtc = providerTime,
-            PayloadDigest = Convert.ToHexString(SHA256.HashData(body))
-        });
-        var delivery = await dbContext.NotificationDeliveries.SingleOrDefaultAsync(
-            x => x.Provider == provider && x.ProviderMessageId == messageId,
-            cancellationToken);
-        if (delivery is null)
-        {
-            delivery = new NotificationDelivery { Provider = provider, ProviderMessageId = messageId };
-            dbContext.NotificationDeliveries.Add(delivery);
-        }
-        delivery.Status = status;
-        delivery.ProviderConfirmedAtUtc = clock.UtcNow;
-        dbContext.OutboxMessages.Add(new OutboxMessage
-        {
-            EventType = "notification.delivery.updated",
-            PayloadJson = JsonSerializer.Serialize(new { provider, messageId, status })
-        });
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return new WebhookResult(false, "accepted");
+            await ProcessingGate.WaitAsync(cancellationToken);
+            try
+            {
+                if (await dbContext.WebhookReceipts.AnyAsync(
+                        x => x.Provider == normalizedProvider && x.DeliveryId == deliveryId, cancellationToken))
+                    return new WebhookResult(true, "already-accepted");
+
+                dbContext.WebhookReceipts.Add(new WebhookReceipt
+                {
+                    Provider = normalizedProvider,
+                    DeliveryId = deliveryId,
+                    ProviderTimestampUtc = providerTime,
+                    PayloadDigest = Convert.ToHexString(SHA256.HashData(body))
+                });
+                var delivery = await dbContext.NotificationDeliveries.SingleOrDefaultAsync(
+                    x => x.Provider == normalizedProvider && x.ProviderMessageId == messageId,
+                    cancellationToken);
+                if (delivery is null)
+                {
+                    delivery = new NotificationDelivery { Provider = normalizedProvider, ProviderMessageId = messageId };
+                    dbContext.NotificationDeliveries.Add(delivery);
+                }
+                delivery.Status = normalizedStatus;
+                delivery.ProviderConfirmedAtUtc = clock.UtcNow;
+                dbContext.OutboxMessages.Add(new OutboxMessage
+                {
+                    EventType = "notification.delivery.updated",
+                    PayloadJson = JsonSerializer.Serialize(new { provider = normalizedProvider, messageId, status = normalizedStatus })
+                });
+                try
+                {
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                }
+                catch (DbUpdateException)
+                {
+                    dbContext.ChangeTracker.Clear();
+                    if (await dbContext.WebhookReceipts.AsNoTracking().AnyAsync(
+                            x => x.Provider == normalizedProvider && x.DeliveryId == deliveryId, cancellationToken))
+                        return new WebhookResult(true, "already-accepted");
+                    throw;
+                }
+                return new WebhookResult(false, "accepted");
+            }
+            finally
+            {
+                ProcessingGate.Release();
+            }
         }
     }
 }

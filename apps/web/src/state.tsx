@@ -2,8 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { useTranslation } from 'react-i18next';
 import { applyDocumentLanguage } from './i18n';
 import { defaultPreferences, demoExtraction, demoProfile, demoSession, emptyProfile, emptySession } from './demoData';
-import { MOCK_MODE, api } from './api';
-import { getQueuedUpdates, removeMinimalOfflineCard, saveMinimalOfflineCard } from './offline';
+import { ApiError, MOCK_MODE, api } from './api';
+import { clearUserScopedOfflineData, getQueuedUpdates, removeMinimalOfflineCard, saveMinimalOfflineCard } from './offline';
 import type { DraftEmergency, EmergencyProfile, EmergencySession, Preferences, TriState } from './types';
 
 const PREFERENCES_KEY = 'gh-preferences-v1';
@@ -11,6 +11,7 @@ const PREFERENCES_KEY = 'gh-preferences-v1';
 const initialDraft: DraftEmergency = {
   relationship: 'unknown',
   category: 'unknown',
+  useOwnerProfileForPatient: false,
   input: '',
   location: '',
   answers: {},
@@ -19,14 +20,17 @@ const initialDraft: DraftEmergency = {
 interface AppStateValue {
   authenticated: boolean;
   authChecked: boolean;
+  authUnavailable: boolean;
+  profileBootstrapComplete: boolean;
   setAuthenticated: (value: boolean) => void;
+  clearUserState: () => Promise<void>;
   profile: EmergencyProfile;
   setProfile: (profile: EmergencyProfile) => void;
   preferences: Preferences;
   updatePreferences: (update: Partial<Preferences>) => void;
   draft: DraftEmergency;
   updateDraft: (update: Partial<DraftEmergency>) => void;
-  answerQuestion: (id: string, answer: TriState) => void;
+  answerQuestion: (id: string, answer: string) => void;
   resetDraft: () => void;
   session: EmergencySession;
   setSession: (session: EmergencySession) => void;
@@ -49,9 +53,12 @@ function loadPreferences(): Preferences {
 
 export function AppStateProvider({ children }: { children: ReactNode }) {
   const { i18n } = useTranslation();
-  const [authenticated, setAuthenticated] = useState(MOCK_MODE);
+  const [authenticated, setAuthenticatedState] = useState(MOCK_MODE);
   const [authChecked, setAuthChecked] = useState(MOCK_MODE);
-  const [profile, setProfile] = useState(MOCK_MODE ? demoProfile : emptyProfile);
+  const [authUnavailable, setAuthUnavailable] = useState(false);
+  const [profile, setProfileState] = useState(MOCK_MODE ? demoProfile : emptyProfile);
+  const [profileHydrated, setProfileHydrated] = useState(MOCK_MODE);
+  const [profileBootstrapComplete, setProfileBootstrapComplete] = useState(MOCK_MODE);
   const [preferences, setPreferences] = useState(loadPreferences);
   const [draft, setDraft] = useState(initialDraft);
   const [session, setSession] = useState(MOCK_MODE ? demoSession : emptySession);
@@ -60,15 +67,98 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
   const refreshQueueCount = useCallback(() => setQueueCount(getQueuedUpdates().length), []);
 
+  const clearInMemoryUserState = useCallback(() => {
+    setProfileState(emptyProfile);
+    setProfileHydrated(false);
+    setProfileBootstrapComplete(false);
+    setDraft(initialDraft);
+    setSession(emptySession);
+  }, []);
+
+  const clearUserState = useCallback(() => {
+    clearInMemoryUserState();
+    return clearUserScopedOfflineData();
+  }, [clearInMemoryUserState]);
+
+  const setAuthenticated = useCallback((value: boolean) => {
+    if (!value) {
+      void clearUserState();
+      setAuthenticatedState(false);
+      return;
+    }
+    if (MOCK_MODE) {
+      setProfileState(demoProfile);
+      setProfileHydrated(true);
+      setProfileBootstrapComplete(true);
+      setSession(demoSession);
+      setDraft(initialDraft);
+    } else {
+      clearInMemoryUserState();
+    }
+    setAuthUnavailable(false);
+    setAuthenticatedState(true);
+  }, [clearInMemoryUserState, clearUserState]);
+
   useEffect(() => {
     if (MOCK_MODE) return;
-    void api.getCurrentUser().then(() => setAuthenticated(true)).catch(() => setAuthenticated(false)).finally(() => setAuthChecked(true));
-  }, []);
+    if (!online) {
+      clearInMemoryUserState();
+      setAuthenticatedState(false);
+      setAuthUnavailable(true);
+      setAuthChecked(true);
+      return;
+    }
+    setAuthChecked(false);
+    void api.getCurrentUser()
+      .then(() => {
+        clearInMemoryUserState();
+        setAuthenticatedState(true);
+        setAuthUnavailable(false);
+      })
+      .catch((error: unknown) => {
+        if (error instanceof ApiError && error.status === 401) void clearUserState();
+        else clearInMemoryUserState();
+        setAuthenticatedState(false);
+        setAuthUnavailable(!(error instanceof ApiError && error.status === 401));
+      })
+      .finally(() => setAuthChecked(true));
+  }, [clearInMemoryUserState, clearUserState, online]);
+
+  useEffect(() => {
+    if (!online) return;
+    void fetch('/api/v1/protocols?country=IN', { credentials: 'omit' }).catch(() => undefined);
+  }, [online]);
 
   useEffect(() => {
     if (!authenticated || MOCK_MODE) return;
-    void api.getProfile().then(setProfile).catch(() => setProfile(emptyProfile));
+    let active = true;
+    setProfileBootstrapComplete(false);
+    void api.getProfile()
+      .then((loadedProfile) => {
+        if (!active) return;
+        setProfileState(loadedProfile);
+        setProfileHydrated(true);
+        setProfileBootstrapComplete(true);
+      })
+      .catch(() => {
+        if (!active) return;
+        setProfileState(emptyProfile);
+        setProfileHydrated(false);
+        setProfileBootstrapComplete(true);
+      });
+    return () => { active = false; };
   }, [authenticated]);
+
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      void clearUserState();
+      setAuthenticatedState(false);
+      setAuthUnavailable(false);
+      setAuthChecked(true);
+    };
+    window.addEventListener('gh-auth-expired', handleAuthExpired);
+    return () => window.removeEventListener('gh-auth-expired', handleAuthExpired);
+  }, [clearUserState]);
 
   useEffect(() => {
     const setOnlineState = () => setOnline(navigator.onLine);
@@ -92,9 +182,15 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     document.documentElement.classList.toggle('large-text', preferences.largeText);
     document.documentElement.classList.toggle('reduced-motion', preferences.reducedMotion);
     document.documentElement.classList.toggle('simple-mode', preferences.simpleMode);
-    if (preferences.offlineCardEnabled) saveMinimalOfflineCard(profile);
-    else removeMinimalOfflineCard();
-  }, [i18n, preferences, profile]);
+    if (!preferences.offlineCardEnabled) void removeMinimalOfflineCard();
+    else if (profileHydrated) void saveMinimalOfflineCard(profile);
+  }, [i18n, preferences, profile, profileHydrated]);
+
+  const setProfile = useCallback((nextProfile: EmergencyProfile) => {
+    setProfileState(nextProfile);
+    setProfileHydrated(true);
+    setProfileBootstrapComplete(true);
+  }, []);
 
   const updatePreferences = useCallback((update: Partial<Preferences>) => {
     setPreferences((current) => ({ ...current, ...update }));
@@ -104,14 +200,15 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     setDraft((current) => ({ ...current, ...update }));
   }, []);
 
-  const answerQuestion = useCallback((id: string, answer: TriState) => {
+  const answerQuestion = useCallback((id: string, answer: string) => {
     setDraft((current) => ({ ...current, answers: { ...current.answers, [id]: answer } }));
+    const triState: TriState | undefined = answer === 'yes' || answer === 'no' || answer === 'unknown' ? answer : undefined;
     setSession((current) => ({
       ...current,
       extraction: {
         ...current.extraction,
-        isBreathingNormally: id === 'breathing' ? answer : current.extraction.isBreathingNormally,
-        isConscious: id === 'conscious' ? answer : current.extraction.isConscious,
+        isBreathingNormally: id === 'breathing' && triState ? triState : current.extraction.isBreathingNormally,
+        isConscious: id === 'conscious' && triState ? triState : current.extraction.isConscious,
       },
     }));
   }, []);
@@ -121,7 +218,10 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AppStateValue>(() => ({
     authenticated,
     authChecked,
+    authUnavailable,
+    profileBootstrapComplete,
     setAuthenticated,
+    clearUserState,
     profile,
     setProfile,
     preferences,
@@ -135,7 +235,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     online,
     queueCount,
     refreshQueueCount,
-  }), [answerQuestion, authChecked, authenticated, draft, online, preferences, profile, queueCount, refreshQueueCount, resetDraft, session, updateDraft, updatePreferences]);
+  }), [answerQuestion, authChecked, authUnavailable, authenticated, clearUserState, draft, online, preferences, profile, profileBootstrapComplete, queueCount, refreshQueueCount, resetDraft, session, setAuthenticated, setProfile, updateDraft, updatePreferences]);
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;
 }

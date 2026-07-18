@@ -61,11 +61,19 @@ public sealed record ProfileResponse(
     SharingPreference? SharingPreference,
     DateTime? ReviewedAtUtc);
 
+public sealed record ContactVerificationChallengeResponse(
+    string Challenge,
+    DateTime ExpiresAtUtc,
+    string Status,
+    string? DevelopmentCode = null);
+public sealed record ConfirmContactVerificationRequest(string Challenge, string Code);
+
 public sealed record CreateSessionRequest(
     PatientRelationship PatientRelationship,
     IncidentCategory SelectedCategory,
     string? TypedLocation,
-    string CountryCode = "IN");
+    string CountryCode = "IN",
+    bool UseOwnerProfileForPatient = false);
 
 public sealed record SubmitIncidentRequest(string OriginalText, string? SelectedLanguage, IncidentCategory? FallbackCategory, bool SkipAi = false);
 public sealed record CriticalAnswersRequest(
@@ -104,7 +112,7 @@ public sealed record TaskResponse(
     DateTime? CompletedAtUtc,
     Guid ConcurrencyToken);
 
-public sealed record TimelineEventResponse(Guid Id, long Sequence, string Type, string Message, DateTime CreatedAtUtc);
+public sealed record TimelineEventResponse(Guid Id, long Sequence, string Type, string Message, string Source, DateTime CreatedAtUtc);
 public sealed record ParticipantResponse(Guid Id, string DisplayName, ParticipantRole Role, DateTime? AcknowledgedAtUtc);
 public sealed record LocationResponse(Guid Id, decimal? Latitude, decimal? Longitude, string? Description, DateTime CreatedAtUtc);
 public sealed record ObservationResponse(Guid Id, string Kind, string Value, string Source, bool IsConfirmed, DateTime CreatedAtUtc);

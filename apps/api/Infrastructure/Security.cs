@@ -55,6 +55,12 @@ public sealed class TokenService(
 
         if (current.RevokedAtUtc is not null)
         {
+            dbContext.AuditEvents.Add(new AuditEvent
+            {
+                Action = "refresh-token-reuse-detected",
+                ResourceType = "RefreshTokenFamily",
+                ResourceId = current.FamilyId.ToString()
+            });
             await RevokeFamilyAsync(current.FamilyId, now, cancellationToken);
             throw new RefreshTokenReuseException();
         }

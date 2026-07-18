@@ -28,11 +28,15 @@ param(
 
     [Security.SecureString] $OpenAiApiKey,
 
+    [Security.SecureString] $SmsGatewaySigningSecret,
+
     [Security.SecureString] $DemoPassword,
 
     [bool] $UseMockProviders = $true,
 
     [string] $OpenAiModel = 'gpt-4.1-mini',
+
+    [string] $SmsGatewayEndpoint = '',
 
     [string] $EmergencyNumber = '112',
 
@@ -140,7 +144,20 @@ $postgresPasswordPlain = ConvertFrom-SecureValue $PostgresAdminPassword
 $jwtSigningKeyPlain = ConvertFrom-SecureValue $JwtSigningKey
 $webhookSigningSecretPlain = ConvertFrom-SecureValue $WebhookSigningSecret
 $openAiApiKeyPlain = ConvertFrom-SecureValue $OpenAiApiKey
+$smsGatewaySigningSecretPlain = ConvertFrom-SecureValue $SmsGatewaySigningSecret
 $demoPasswordPlain = ConvertFrom-SecureValue $DemoPassword
+
+if (-not $UseMockProviders) {
+    if ([string]::IsNullOrWhiteSpace($openAiApiKeyPlain)) {
+        throw 'OpenAiApiKey is required when UseMockProviders is false.'
+    }
+    if ([string]::IsNullOrWhiteSpace($SmsGatewayEndpoint) -or -not [Uri]::IsWellFormedUriString($SmsGatewayEndpoint, [UriKind]::Absolute) -or -not $SmsGatewayEndpoint.StartsWith('https://', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'SmsGatewayEndpoint must be an absolute HTTPS URL when UseMockProviders is false.'
+    }
+    if ([Text.Encoding]::UTF8.GetByteCount($smsGatewaySigningSecretPlain) -lt 32) {
+        throw 'SmsGatewaySigningSecret must contain at least 32 UTF-8 bytes when UseMockProviders is false.'
+    }
+}
 
 $parameterDocument = [ordered]@{
     '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
@@ -155,9 +172,11 @@ $parameterDocument = [ordered]@{
         jwtSigningKey = @{ value = $jwtSigningKeyPlain }
         webhookSigningSecret = @{ value = $webhookSigningSecretPlain }
         openAiApiKey = @{ value = $openAiApiKeyPlain }
+        smsGatewaySigningSecret = @{ value = $smsGatewaySigningSecretPlain }
         demoPassword = @{ value = $demoPasswordPlain }
         useMockProviders = @{ value = $UseMockProviders }
         openAiModel = @{ value = $OpenAiModel }
+        smsGatewayEndpoint = @{ value = $SmsGatewayEndpoint }
         emergencyNumber = @{ value = $EmergencyNumber }
     }
 }
@@ -195,6 +214,7 @@ finally {
     $jwtSigningKeyPlain = $null
     $webhookSigningSecretPlain = $null
     $openAiApiKeyPlain = $null
+    $smsGatewaySigningSecretPlain = $null
     $demoPasswordPlain = $null
     if (Test-Path -LiteralPath $parameterPath) {
         Remove-Item -LiteralPath $parameterPath -Force
